@@ -1,0 +1,9 @@
+models:
+  qwen3-0.6b:
+    model_dir: "assets/models/Qwen3-0.6B-Base"
+
+  qwen3-1.7b:
+    model_dir: "assets/models/Qwen3-1.7B-Base"
+
+
+default_model: "qwen3-0.6b"

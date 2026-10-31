@@ -23,3 +23,12 @@
 - ✅ 支持单条文本编码与解码
 - ✅ 编写配置和 tokenizer 测试
 - ⬜ 暂不支持 batch 文本处理
+
+### day 4
+
+- ✅ 实现 `src/stepinfer/inference/sampler.py`（基于 argmax 的贪心采样）
+- ✅ 实现 `src/stepinfer/inference/generator.py`（自回归生成：前向计算 → 采样 → EOS/最大长度停止）
+- ✅ 实现 `src/stepinfer/inference/inference_engine.py`（推理协调：编码 → 生成 → 解码）
+- ✅ 编写相关测试（采样、生成循环和推理协调器）
+- ⬜ 暂不支持 batch、KV Cache 和其他采样策略
+

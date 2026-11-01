@@ -32,3 +32,10 @@
 - ✅ 编写相关测试（采样、生成循环和推理协调器）
 - ⬜ 暂不支持 batch、KV Cache 和其他采样策略
 
+### day 5
+
+- ✅ 搭建 Qwen3 现代模型架构与算子层骨架（`layers/`、`models/`）
+- ✅ 实现 `src/stepinfer/config/qwen3_config.py`（超参映射、GQA 整除约束、head_dim 回退与正数防御校验）
+- ✅ 实现 `src/stepinfer/layers/norm.py`（基础 RMSNorm 及残差融合 Fused Add + RMSNorm 算子）
+- ✅ 编写配置与 RMSNorm 单元测试，全量通过
+- 🔄 推进中：待实现 RoPE、SwiGLU 与 Attention 核心模块

@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from stepinfer.layers.activation import SiluAndMul
+from stepinfer.layers.attention import CausalAttention
 from stepinfer.layers.norm import RMSNorm
 from stepinfer.layers.rotary_embedding import RotaryEmbedding, apply_rotary_emb
 
@@ -253,3 +254,123 @@ def test_silu_and_mul_odd_dimension_raises_error():
 
     with pytest.raises(ValueError, match="The last dimension of input tensor must be even"):
         act(bad_x)
+
+
+# ==============================================================================
+# CausalAttention (因果自注意力算子) 测试用例
+# ==============================================================================
+
+
+def test_causal_attention_forward_shape_and_dtype():
+    """验证因果自注意力在 MHA 和 GQA 模式下的输出形状与数据类型保持。"""
+    # 1. MHA 模式 (num_heads == num_kv_heads)
+    attn_mha = CausalAttention(num_heads=4, head_dim=32)
+    q = torch.randn(2, 6, 4, 32, dtype=torch.float32)
+    k = torch.randn(2, 6, 4, 32, dtype=torch.float32)
+    v = torch.randn(2, 6, 4, 32, dtype=torch.float32)
+    out_mha = attn_mha(q, k, v)
+
+    assert out_mha.shape == (2, 6, 4, 32)
+    assert out_mha.dtype == torch.float32
+    assert out_mha.is_contiguous()
+
+    # 2. GQA 模式 (num_heads=16, num_kv_heads=8, 如 Qwen3-0.6B) 与 bfloat16
+    attn_gqa = CausalAttention(num_heads=16, head_dim=128, num_kv_heads=8)
+    q_gqa = torch.randn(1, 10, 16, 128, dtype=torch.bfloat16)
+    k_gqa = torch.randn(1, 10, 8, 128, dtype=torch.bfloat16)
+    v_gqa = torch.randn(1, 10, 8, 128, dtype=torch.bfloat16)
+    out_gqa = attn_gqa(q_gqa, k_gqa, v_gqa)
+
+    assert out_gqa.shape == (1, 10, 16, 128)
+    assert out_gqa.dtype == torch.bfloat16
+    assert out_gqa.is_contiguous()
+
+
+def test_causal_attention_causal_mask_prevents_future_leakage():
+    """验证因果掩码核心特性: 修改未来时刻的输入绝对不影响过去时刻的注意力输出。"""
+    attn = CausalAttention(num_heads=2, head_dim=16)
+    seq_len = 4
+
+    q = torch.randn(1, seq_len, 2, 16)
+    k = torch.randn(1, seq_len, 2, 16)
+    v = torch.randn(1, seq_len, 2, 16)
+
+    # 初始计算
+    out1 = attn(q, k, v)
+
+    # 修改最后一个时刻 (t=3) 的 Key 和 Value
+    k_modified = k.clone()
+    v_modified = v.clone()
+    k_modified[:, 3:, :, :] += 10.0
+    v_modified[:, 3:, :, :] += 20.0
+
+    out2 = attn(q, k_modified, v_modified)
+
+    # 时刻 t=0, 1, 2 的输出必须完全相同 (严防未来信息泄露)
+    assert torch.allclose(out1[:, :3, :, :], out2[:, :3, :, :], atol=1e-6)
+    # 而时刻 t=3 的输出应该受到影响 (发生了变化)
+    assert not torch.allclose(out1[:, 3:, :, :], out2[:, 3:, :, :], atol=1e-4)
+
+
+def test_causal_attention_single_token_equals_value():
+    """验证单 Token 序列 (seq_len=1) 下，Softmax 归一化后权重为 1，输出严格等于 Value。"""
+    attn = CausalAttention(num_heads=4, head_dim=16, num_kv_heads=4)
+    q = torch.randn(2, 1, 4, 16)
+    k = torch.randn(2, 1, 4, 16)
+    v = torch.randn(2, 1, 4, 16)
+
+    out = attn(q, k, v)
+    assert torch.allclose(out, v, atol=1e-5)
+
+
+def test_causal_attention_gqa_expansion_equivalence():
+    """验证 GQA 内部扩展与手动 repeat_interleave 后的 MHA 计算完全等价。"""
+    attn_gqa = CausalAttention(num_heads=4, head_dim=16, num_kv_heads=2)
+    attn_mha = CausalAttention(num_heads=4, head_dim=16, num_kv_heads=4)
+
+    torch.manual_seed(42)
+    q = torch.randn(1, 5, 4, 16)
+    k = torch.randn(1, 5, 2, 16)
+    v = torch.randn(1, 5, 2, 16)
+
+    # 1. GQA 原生计算
+    out_gqa = attn_gqa(q, k, v)
+
+    # 2. 外部显式 repeat 后通过 MHA 计算
+    k_repeated = k.repeat_interleave(2, dim=2)
+    v_repeated = v.repeat_interleave(2, dim=2)
+    out_mha = attn_mha(q, k_repeated, v_repeated)
+
+    assert torch.allclose(out_gqa, out_mha, atol=1e-6)
+
+
+def test_causal_attention_validation_and_errors():
+    """验证因果注意力初始化参数及输入张量维度的防御性异常拦截。"""
+    # 1. 头数不能被整除
+    with pytest.raises(ValueError, match="must be divisible by num_kv_heads"):
+        CausalAttention(num_heads=7, head_dim=16, num_kv_heads=3)
+
+    # 2. 非正参数
+    with pytest.raises(ValueError, match="must be positive integers"):
+        CausalAttention(num_heads=0, head_dim=16)
+
+    attn = CausalAttention(num_heads=4, head_dim=16, num_kv_heads=2)
+    q = torch.randn(1, 4, 4, 16)
+    k = torch.randn(1, 4, 2, 16)
+    v = torch.randn(1, 4, 2, 16)
+
+    # 3. 维度不匹配 (非 4D)
+    with pytest.raises(ValueError, match="Input tensors must be 4D"):
+        attn(q.squeeze(0), k, v)
+
+    # 4. 序列长度不一致
+    with pytest.raises(ValueError, match="Sequence lengths do not match"):
+        attn(q, k[:, :3, :, :], v)
+
+    # 5. 头数不匹配
+    with pytest.raises(ValueError, match="Head count mismatch"):
+        attn(torch.randn(1, 4, 8, 16), k, v)
+
+    # 6. head_dim 不匹配
+    with pytest.raises(ValueError, match="head_dim mismatch"):
+        attn(torch.randn(1, 4, 4, 32), k, v)

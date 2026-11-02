@@ -2,7 +2,9 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
+from stepinfer.layers.activation import SiluAndMul
 from stepinfer.layers.norm import RMSNorm
 from stepinfer.layers.rotary_embedding import RotaryEmbedding, apply_rotary_emb
 
@@ -205,3 +207,49 @@ def test_rotary_embedding_validation_and_errors():
     # 非法 3D positions
     with pytest.raises(ValueError, match="positions tensor must be 1D or 2D"):
         rope(torch.zeros(1, 2, 3, dtype=torch.long), q, k)
+
+
+# ==============================================================================
+# SiluAndMul (SwiGLU 激活算子) 测试用例
+# ==============================================================================
+
+
+def test_silu_and_mul_forward_shape_and_dtype():
+    """验证 SiluAndMul 算子的输出形状（减半）与数据类型保持不变。"""
+    act = SiluAndMul()
+    intermediate_size = 128
+
+    # 1. 2D 输入 [batch, 2 * intermediate_size]
+    x_2d = torch.randn(2, 2 * intermediate_size, dtype=torch.float32)
+    out_2d = act(x_2d)
+    assert out_2d.shape == (2, intermediate_size)
+    assert out_2d.dtype == torch.float32
+
+    # 2. 3D 输入 [batch, seq_len, 2 * intermediate_size] 及 bfloat16 支持
+    x_3d = torch.randn(2, 8, 2 * intermediate_size, dtype=torch.bfloat16)
+    out_3d = act(x_3d)
+    assert out_3d.shape == (2, 8, intermediate_size)
+    assert out_3d.dtype == torch.bfloat16
+
+
+def test_silu_and_mul_mathematical_correctness():
+    """验证 SiluAndMul 计算数值与理论公式 SiLU(gate) * up 严格对齐。"""
+    act = SiluAndMul()
+
+    # 构造确定性张量
+    x = torch.tensor([[1.0, -2.0, 3.0, 0.5]], dtype=torch.float32)
+    # 前半段 gate: [1.0, -2.0], 后半段 up: [3.0, 0.5]
+    gate, up = torch.chunk(x, chunks=2, dim=-1)
+    expected = F.silu(gate) * up
+
+    actual = act(x)
+    assert torch.allclose(actual, expected, atol=1e-6)
+
+
+def test_silu_and_mul_odd_dimension_raises_error():
+    """验证输入张量末尾维度为奇数时抛出 ValueError。"""
+    act = SiluAndMul()
+    bad_x = torch.randn(2, 4, 15)  # 15 不能被 2 整除
+
+    with pytest.raises(ValueError, match="The last dimension of input tensor must be even"):
+        act(bad_x)

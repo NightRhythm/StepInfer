@@ -38,4 +38,13 @@
 - ✅ 实现 `src/stepinfer/config/qwen3_config.py`（超参映射、GQA 整除约束、head_dim 回退与正数防御校验）
 - ✅ 实现 `src/stepinfer/layers/norm.py`（基础 RMSNorm 及残差融合 Fused Add + RMSNorm 算子）
 - ✅ 编写配置与 RMSNorm 单元测试，全量通过
-- 🔄 推进中：待实现 RoPE、SwiGLU 与 Attention 核心模块
+
+### day 6
+
+- ✅ 实现 `src/stepinfer/layers/rotary_embedding.py`（RoPE 旋转位置编码，支持 Half-Split 与 GQA 广播）
+- ✅ 实现 `src/stepinfer/layers/activation.py`（SwiGLU 门控前馈网络所需的 `SiluAndMul` 激活算子）
+- ✅ 实现 `src/stepinfer/layers/attention.py`（带 GQA 头扩展与因果掩码的 `CausalAttention` 点积注意力算子）
+- ✅ 实现 `src/stepinfer/models/qwen3.py`（Qwen3MLP、Qwen3Attention、Qwen3DecoderLayer、Qwen3Model 与 Qwen3ForCausalLM 顶层总装）
+- ✅ 支持 DecoderLayer 间残差流水线融合传递与 LM Head 权重共享（Weight Tying）
+- ✅ 编写算子层与模型层全量单元测试，全部通过
+- ✅ 编写端到端冒烟测试 `tests/test_smoke_forward.py`，接入 `InferenceEngine` 在 CPU 与 GPU (RTX 5060 Ti) 验证自回归生成全链路通畅

@@ -48,3 +48,11 @@
 - ✅ 支持 DecoderLayer 间残差流水线融合传递与 LM Head 权重共享（Weight Tying）
 - ✅ 编写算子层与模型层全量单元测试，全部通过
 - ✅ 编写端到端冒烟测试 `tests/test_smoke_forward.py`，接入 `InferenceEngine` 在 CPU 与 GPU (RTX 5060 Ti) 验证自回归生成全链路通畅
+
+### day 7
+
+- ✅ 实现 `src/stepinfer/models/loader.py`（Safetensors 流式加载、Merged GEMM 拼接映射与对齐审计报告）
+- ✅ 编写 `tests/test_weight_loader.py`（验证官方 310 个权重张量 100% 对齐就绪与 GPU 迁移）
+- ✅ 编写 `tests/test_inference.py`（涵盖中英文事实常识问答、贪心解码确定性与前缀连贯性）
+- ✅ 验证两类停止条件拦截（达到 `max_new_tokens` 截断与命中 EOS 提前退出）
+- ⬜ 暂不支持 KV Cache（全量计算模式）与 Batch 推理

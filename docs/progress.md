@@ -56,3 +56,12 @@
 - ✅ 编写 `tests/test_inference.py`（涵盖中英文事实常识问答、贪心解码确定性与前缀连贯性）
 - ✅ 验证两类停止条件拦截（达到 `max_new_tokens` 截断与命中 EOS 提前退出）
 - ⬜ 暂不支持 KV Cache（全量计算模式）与 Batch 推理
+
+### day 8
+
+- ✅ 实现 `src/stepinfer/utils/profiler.py`（封装 `torch.profiler`，支持 CPU/CUDA 算子剖析、张量形状与内存追踪，支持导出 Chrome Trace）
+- ✅ 实现 `src/stepinfer/utils/gpu_monitor.py`（纯原生 PyTorch 实现 `GPUMonitor` 与 `GPUMemorySnapshot`，支持显存分配快照与 `track_peak` 上下文峰值追踪）
+- ✅ 实现 `benchmarks/metrics.py`（基于硬件级 `torch.cuda.Event` 的 `BenchmarkTracker`，解耦 Prefill 与 Decode 耗时，精确提取 TTFT、单步 ITL 序列与分位线，支持 MFU 估算）
+- ✅ 编写 `benchmarks/latency_benchmark.py`（支持不同 Prompt 长度基准跑分与 Markdown 表格汇总输出）
+- ✅ 编写工具链单元测试（`test_profiler.py`、`test_gpu_monitor.py`、`test_metrics.py`，全量 101 测试全绿）
+- ⬜ 待实际运行基线跑分验证并记录

@@ -4,19 +4,19 @@
 
 在仓库根目录运行：
 
-```powershell
+```bash
 uv run python benchmarks/latency_benchmark.py --warmup-runs 3 --repeats 10
 ```
 
 默认输入长度为 `32 64 256 512 1024`，每轮生成 32 个 token。默认报告为 `docs/benchmarks/generation-benchmark.md`，相邻的 `.json` 文件保存原始数据。可根据目标 GPU 的可用显存调整最大输入长度和输出长度。
 
-报告模板只描述测量配置和指标口径，不在标题、文件名或元数据中写死 KV Cache 等模型实现状态。可通过 `--report-path` 指定实验文件名，或在运行后重命名并补充实现状态、优化内容及分析结论；归档时保留对应的 JSON 原始数据。报告记录代码 commit 和工作区是否有未提交修改，辅助定位实验版本。
+可通过 `--report-path` 指定实验文件名，或在运行后重命名并补充实现状态、优化内容及分析结论；归档时保留对应的 JSON 原始数据。报告记录代码 commit 和工作区是否有未提交修改，辅助定位实验版本。
 
-模型实现变化时仍需检查 `_run_generation()` 是否调用了预期的推理路径。报告模板与实现状态分离，并不意味着现有生成循环会自动接入新增的缓存或调度接口。
+模型实现变化时仍需检查 `_run_generation()` 是否调用了预期的推理路径。报告模板与实现状态分离。
 
 Profiler 模式与正式基准测试分开运行：
 
-```powershell
+```bash
 uv run python benchmarks/latency_benchmark.py --profile --prompt-lengths 512 --trace-dir traces
 ```
 

@@ -1,10 +1,13 @@
-"""推理基准评测指标采集器，支持高精度 CUDA Event 计时、延迟分布与 MFU 统计。"""
+"""受控单请求生成运行的计时和显存指标。"""
 
 from __future__ import annotations
 
+import statistics
+import math
 import time
-from dataclasses import dataclass
-from typing import List
+from dataclasses import asdict, dataclass
+from typing import Any
+
 import torch
 
 from stepinfer.utils.gpu_monitor import GPUMonitor
@@ -12,180 +15,214 @@ from stepinfer.utils.gpu_monitor import GPUMonitor
 
 @dataclass(frozen=True)
 class BenchmarkResult:
-    """单次基准评测的结构化指标结果。"""
+    """一次测量运行的结果；设备计时不包含分词和文本解码。"""
 
     prompt_tokens: int
     generated_tokens: int
-    total_time_sec: float
-    ttft_ms: float                     # 首 Token 延迟（Prefill 耗时，单位：ms）
-    avg_itl_ms: float                  # 平均单步解码延迟（单位：ms）
-    p50_itl_ms: float                  # P50 解码延迟（单位：ms）
-    p90_itl_ms: float                  # P90 解码延迟（单位：ms）
-    p99_itl_ms: float                  # P99 解码延迟（单位：ms）
-    throughput_tok_per_sec: float      # 端到端总吞吐（tokens/s）
-    peak_memory_mb: float              # 峰值显存（MB）
-    mfu_percent: float | None = None   # Model FLOPs Utilization 百分比 (%)
+    generation_wall_time_sec: float
+    first_token_interval_ms: float
+    timing_backend: str
+    step_intervals_ms: tuple[float, ...]
+    avg_itl_ms: float | None
+    p50_itl_ms: float | None
+    p90_itl_ms: float | None
+    p99_itl_ms: float | None
+    generation_wall_throughput_tok_per_sec: float
+    allocated_before_mb: float
+    reserved_before_mb: float
+    peak_allocated_mb: float
+    peak_allocated_delta_mb: float
+    peak_reserved_mb: float
+    peak_reserved_delta_mb: float
+    device_free_after_mb: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
     def summary(self) -> str:
-        """返回多行易读的指标汇总文本。"""
-        mfu_str = f"{self.mfu_percent:.2f}%" if self.mfu_percent is not None else "N/A"
+        def fmt(value: float | None) -> str:
+            return "N/A" if value is None else f"{value:.2f}"
+
         return (
             f"Prompt: {self.prompt_tokens} tokens | Generated: {self.generated_tokens} tokens\n"
-            f"Total Time: {self.total_time_sec:.3f} s | Throughput: {self.throughput_tok_per_sec:.2f} tok/s\n"
-            f"TTFT: {self.ttft_ms:.2f} ms | Avg ITL: {self.avg_itl_ms:.2f} ms "
-            f"(P50: {self.p50_itl_ms:.2f} ms, P90: {self.p90_itl_ms:.2f} ms, P99: {self.p99_itl_ms:.2f} ms)\n"
-            f"Peak VRAM: {self.peak_memory_mb:.2f} MB | MFU: {mfu_str}"
+            f"Generation wall time: {self.generation_wall_time_sec:.3f} s | "
+            f"Wall throughput: {self.generation_wall_throughput_tok_per_sec:.2f} tok/s\n"
+            f"First-token interval: {self.first_token_interval_ms:.2f} ms | "
+            f"Avg ITL: {fmt(self.avg_itl_ms)} ms "
+            f"(P50: {fmt(self.p50_itl_ms)} ms, "
+            f"P90: {fmt(self.p90_itl_ms)} ms, "
+            f"P99: {fmt(self.p99_itl_ms)} ms)\n"
+            f"Peak allocated: {self.peak_allocated_mb:.2f} MiB "
+            f"(+{self.peak_allocated_delta_mb:.2f} MiB over baseline) | "
+            f"Peak reserved: {self.peak_reserved_mb:.2f} MiB "
+            f"(+{self.peak_reserved_delta_mb:.2f} MiB over baseline)"
         )
 
 
 class BenchmarkTracker:
-    """基于 CUDA Event / 高精度计时器的端到端推理指标追踪器。"""
+    """测量模型生成墙钟耗时和逐 token 的设备时间间隔。"""
 
-    # 常见 GPU 理论半精度（FP16/BF16）峰值 TFLOPS 参考表
-    PEAK_TFLOPS_MAP = {
-        "5060 ti": 45.0,  # RTX 5060 Ti
-        "4090": 330.0,    # RTX 4090
-        "3090": 142.0,    # RTX 3090
-        "l40s": 362.0,    # L40S
-        "a100": 312.0,    # A100 SXM 80GB
-        "h100": 1979.0,   # H100 SXM
-        "v100": 125.0,    # V100
-    }
-
-    def __init__(
-        self,
-        device: str | torch.device = "cuda:0",
-        num_params: int = 0,
-        peak_tflops: float | None = None,
-    ) -> None:
-        """初始化追踪器。
-
-        参数：
-            device: 目标设备。
-            num_params: 模型参数量，用于估算 MFU。
-            peak_tflops: 可选的手动指定 GPU 峰值 TFLOPS。若不指定则根据 GPU 型号自动推导。
-        """
+    def __init__(self, device: str | torch.device = "cuda:0") -> None:
         self.device = torch.device(device)
-        self.num_params = num_params
-        self.custom_peak_tflops = peak_tflops
+        if self.device.type not in ("cpu", "cuda"):
+            raise ValueError("Only CPU and CUDA timing are supported.")
+        if self.device.type == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA was requested but is not available.")
+            if self.device.index is None:
+                self.device = torch.device("cuda", torch.cuda.current_device())
         self.use_cuda = self.device.type == "cuda" and torch.cuda.is_available()
         self.gpu_monitor = GPUMonitor(self.device)
-
         self._started = False
-        self._cuda_events: List[torch.cuda.Event] = []
-        self._cpu_times: List[float] = []
+        self._wall_start = 0.0
+        self._wall_end: float | None = None
+        self._stream: torch.cuda.Stream | None = None
+        self._cuda_events: list[torch.cuda.Event] = []
+        self._cpu_step_times: list[float] = []
+        self._allocated_before_mb = 0.0
+        self._reserved_before_mb = 0.0
 
     def start(self) -> None:
-        """启动追踪，记录起点并重置显存监控计数器。"""
-        self._cuda_events.clear()
-        self._cpu_times.clear()
-        self.gpu_monitor.reset_peak_stats()
+        if self._started:
+            raise RuntimeError("BenchmarkTracker is already started.")
 
+        self._cuda_events.clear()
+        self._cpu_step_times.clear()
+        self._wall_end = None
         if self.use_cuda:
             torch.cuda.synchronize(self.device)
-            event = torch.cuda.Event(enable_timing=True)
-            event.record()
-            self._cuda_events.append(event)
-        else:
-            self._cpu_times.append(time.perf_counter())
+        self.gpu_monitor.reset_peak_stats()
 
+        baseline = self.gpu_monitor.snapshot()
+        self._allocated_before_mb = baseline.allocated_mb
+        self._reserved_before_mb = baseline.reserved_mb
+
+        if self.use_cuda:
+            self._stream = torch.cuda.current_stream(self.device)
+            start_event = torch.cuda.Event(enable_timing=True)
+            self._wall_start = time.perf_counter()
+            start_event.record(self._stream)
+            self._cuda_events.append(start_event)
+        else:
+            self._wall_start = time.perf_counter()
         self._started = True
 
     def record_step(self) -> None:
-        """每完成一个生成步（Token）时记录打点。"""
+        """在当前设备流上记录一个已经完成的生成 token 步骤。"""
         if not self._started:
             raise RuntimeError("Cannot record step: BenchmarkTracker has not been started. Call start() first.")
 
         if self.use_cuda:
+            assert self._stream is not None
             event = torch.cuda.Event(enable_timing=True)
-            event.record()
+            event.record(self._stream)
             self._cuda_events.append(event)
         else:
-            self._cpu_times.append(time.perf_counter())
+            self._cpu_step_times.append(time.perf_counter())
 
     def finish(self, prompt_tokens: int) -> BenchmarkResult:
-        """结束追踪并结算全量延迟、吞吐与显存指标。
-
-        参数：
-            prompt_tokens: 输入 Prompt 的 Token 数量。
-        """
+        """同步设备、计算指标并结束当前测量运行。"""
         if not self._started:
             raise RuntimeError("Cannot finish: BenchmarkTracker has not been started.")
-
-        if prompt_tokens <= 0:
+        if not isinstance(prompt_tokens, int) or isinstance(prompt_tokens, bool) or prompt_tokens <= 0:
             raise ValueError("prompt_tokens must be a positive integer.")
 
-        # 1. 计算每个生成步的时间差（毫秒 ms）
-        deltas_ms: List[float] = []
+        try:
+            if self.use_cuda:
+                torch.cuda.synchronize(self.device)
+            self._wall_end = time.perf_counter()
 
-        if self.use_cuda:
-            torch.cuda.synchronize(self.device)
-            for i in range(len(self._cuda_events) - 1):
-                ms = self._cuda_events[i].elapsed_time(self._cuda_events[i + 1])
-                deltas_ms.append(ms)
-        else:
-            for i in range(len(self._cpu_times) - 1):
-                ms = (self._cpu_times[i + 1] - self._cpu_times[i]) * 1000.0
-                deltas_ms.append(ms)
+            if self.use_cuda:
+                intervals = [
+                    self._cuda_events[index].elapsed_time(self._cuda_events[index + 1])
+                    for index in range(len(self._cuda_events) - 1)
+                ]
+            else:
+                intervals = [
+                    (self._cpu_step_times[0] - self._wall_start) * 1000.0,
+                    *[
+                        (self._cpu_step_times[index] - self._cpu_step_times[index - 1]) * 1000.0
+                        for index in range(1, len(self._cpu_step_times))
+                    ],
+                ] if self._cpu_step_times else []
 
-        if not deltas_ms:
-            raise RuntimeError("No generation steps recorded. Did you call record_step()?")
+            if not intervals:
+                raise RuntimeError("No generation steps recorded. Did you call record_step()?")
 
-        # 2. TTFT 与 ITL 切分
-        ttft_ms = deltas_ms[0]
-        itl_ms = deltas_ms[1:] if len(deltas_ms) > 1 else [deltas_ms[0]]
+            first_token_ms = intervals[0]
+            itl = intervals[1:]
+            avg_itl = sum(itl) / len(itl) if itl else None
 
-        total_time_sec = sum(deltas_ms) / 1000.0
-        generated_tokens = len(deltas_ms)
-        throughput = generated_tokens / total_time_sec if total_time_sec > 0 else 0.0
+            def percentile(values: list[float], quantile: float) -> float | None:
+                if not values:
+                    return None
+                ordered = sorted(values)
+                # 在 (n - 1) * q 位置做线性插值，同时兼容 n == 1。
+                position = quantile * (len(ordered) - 1)
+                lower = math.floor(position)
+                upper = math.ceil(position)
+                return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
-        # 3. 分位线与均值
-        sorted_itl = sorted(itl_ms)
-        avg_itl = sum(sorted_itl) / len(sorted_itl)
-        p50 = sorted_itl[int(len(sorted_itl) * 0.50)]
-        p90 = sorted_itl[int(len(sorted_itl) * 0.90)]
-        p99 = sorted_itl[int(len(sorted_itl) * 0.99)]
+            snapshot = self.gpu_monitor.snapshot()
+            wall_time = max(0.0, self._wall_end - self._wall_start)
+            generated_tokens = len(intervals)
+            throughput = generated_tokens / wall_time if wall_time > 0 else 0.0
 
-        # 4. 显存峰值
-        snapshot = self.gpu_monitor.snapshot()
+            return BenchmarkResult(
+                prompt_tokens=prompt_tokens,
+                generated_tokens=generated_tokens,
+                generation_wall_time_sec=wall_time,
+                first_token_interval_ms=first_token_ms,
+                timing_backend="cuda_event" if self.use_cuda else "cpu_perf_counter",
+                step_intervals_ms=tuple(intervals),
+                avg_itl_ms=avg_itl,
+                p50_itl_ms=percentile(itl, 0.50),
+                p90_itl_ms=percentile(itl, 0.90),
+                p99_itl_ms=percentile(itl, 0.99),
+                generation_wall_throughput_tok_per_sec=throughput,
+                allocated_before_mb=self._allocated_before_mb,
+                reserved_before_mb=self._reserved_before_mb,
+                peak_allocated_mb=snapshot.max_allocated_mb,
+                peak_allocated_delta_mb=round(
+                    max(0.0, snapshot.max_allocated_mb - self._allocated_before_mb), 2
+                ),
+                peak_reserved_mb=snapshot.max_reserved_mb,
+                peak_reserved_delta_mb=round(
+                    max(0.0, snapshot.max_reserved_mb - self._reserved_before_mb), 2
+                ),
+                device_free_after_mb=snapshot.free_mb,
+            )
+        finally:
+            self._started = False
+            self._stream = None
 
-        # 5. MFU 计算
-        mfu = self._compute_mfu(throughput)
 
-        self._started = False
+def aggregate_results(results: list[BenchmarkResult]) -> dict[str, dict[str, float]]:
+    """汇总多次运行的中位数以及观测到的最小/最大值。"""
+    if not results:
+        raise ValueError("results cannot be empty")
 
-        return BenchmarkResult(
-            prompt_tokens=prompt_tokens,
-            generated_tokens=generated_tokens,
-            total_time_sec=round(total_time_sec, 4),
-            ttft_ms=round(ttft_ms, 2),
-            avg_itl_ms=round(avg_itl, 2),
-            p50_itl_ms=round(p50, 2),
-            p90_itl_ms=round(p90, 2),
-            p99_itl_ms=round(p99, 2),
-            throughput_tok_per_sec=round(throughput, 2),
-            peak_memory_mb=snapshot.max_allocated_mb,
-            mfu_percent=round(mfu, 4) if mfu is not None else None,
-        )
-
-    def _compute_mfu(self, throughput: float) -> float | None:
-        """估算 MFU (Model FLOPs Utilization)。"""
-        if self.num_params <= 0:
-            return None
-
-        peak_tflops = self.custom_peak_tflops
-        if peak_tflops is None:
-            if not self.use_cuda:
-                return None
-            dev_name = torch.cuda.get_device_name(self.device).lower()
-            for key, tflops in self.PEAK_TFLOPS_MAP.items():
-                if key in dev_name:
-                    peak_tflops = tflops
-                    break
-
-        if peak_tflops is None or peak_tflops <= 0:
-            return None
-
-        # 传统 Transformer 前向运算量估算：每个 token 约进行 2 * num_params 次浮点运算
-        actual_flops = 2 * self.num_params * throughput
-        return (actual_flops / (peak_tflops * 1e12)) * 100.0
+    metrics = (
+        "generation_wall_time_sec",
+        "first_token_interval_ms",
+        "avg_itl_ms",
+        "p50_itl_ms",
+        "p90_itl_ms",
+        "p99_itl_ms",
+        "generation_wall_throughput_tok_per_sec",
+        "peak_allocated_mb",
+        "peak_allocated_delta_mb",
+        "peak_reserved_mb",
+        "peak_reserved_delta_mb",
+    )
+    summary: dict[str, dict[str, float]] = {}
+    for name in metrics:
+        values = [getattr(result, name) for result in results]
+        present = [float(value) for value in values if value is not None]
+        if present:
+            summary[name] = {
+                "median": round(statistics.median(present), 6),
+                "min": round(min(present), 6),
+                "max": round(max(present), 6),
+            }
+    return summary

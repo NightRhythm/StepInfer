@@ -60,8 +60,8 @@
 ### day 8
 
 - ✅ 实现 `src/stepinfer/utils/profiler.py`（封装 `torch.profiler`，支持 CPU/CUDA 算子剖析、张量形状与内存追踪，支持导出 Chrome Trace）
-- ✅ 实现 `src/stepinfer/utils/gpu_monitor.py`（纯原生 PyTorch 实现 `GPUMonitor` 与 `GPUMemorySnapshot`，支持显存分配快照与 `track_peak` 上下文峰值追踪）
-- ✅ 实现 `benchmarks/metrics.py`（基于硬件级 `torch.cuda.Event` 的 `BenchmarkTracker`，解耦 Prefill 与 Decode 耗时，精确提取 TTFT、单步 ITL 序列与分位线，支持 MFU 估算）
-- ✅ 编写 `benchmarks/latency_benchmark.py`（支持不同 Prompt 长度基准跑分与 Markdown 表格汇总输出）
-- ✅ 编写工具链单元测试（`test_profiler.py`、`test_gpu_monitor.py`、`test_metrics.py`，全量 101 测试全绿）
-- ⬜ 待实际运行基线跑分验证并记录
+- ✅ 实现 `src/stepinfer/utils/gpu_monitor.py`（记录 PyTorch allocated/reserved 当前值与峰值，并通过 CUDA 查询设备级 free/total 显存）
+- ✅ 实现 `benchmarks/metrics.py`（区分生成循环墙钟耗时与逐 token 计时区间，记录重复测量原始值及汇总统计；不再提供口径不足的 MFU 估算）
+- ✅ 实现 `benchmarks/latency_benchmark.py`（固定 token-ID 输入和输出长度，支持逐 case 预热、重复测量、独立 profiler 模式与 JSON/Markdown 结果）
+- ✅ 将基准运行说明和报告默认输出目录设为 `docs/benchmarks/`
+- ⬜ 待在目标开发服务器上验证最新实现、确认兼容性并记录真实基线数据

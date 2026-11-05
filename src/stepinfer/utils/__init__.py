@@ -1,4 +1,4 @@
-"""StepInfer 实用工具与性能分析组件。"""
+"""StepInfer utility and profiling components."""
 
 from stepinfer.utils.gpu_monitor import GPUMemorySnapshot, GPUMonitor
 from stepinfer.utils.profiler import TorchProfiler

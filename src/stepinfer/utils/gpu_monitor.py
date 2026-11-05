@@ -1,86 +1,87 @@
-"""轻量级 GPU 显存监控工具，用于追踪张量显存分配与推理过程中的显存峰值。"""
+"""汇总 PyTorch CUDA 分配器用量和设备级剩余显存。"""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Generator
+
 import torch
+
+
+_MIB = 1024 ** 2
 
 
 @dataclass(frozen=True)
 class GPUMemorySnapshot:
-    """GPU 显存快照（单位：MB）。"""
+    """显存单位为 MiB；峰值覆盖最近一次重置统计后的区间。"""
 
-    allocated_mb: float       # 当前 PyTorch 张量实际占用显存
-    reserved_mb: float        # PyTorch 显存缓存池（Caching Allocator）占用显存
-    max_allocated_mb: float   # 统计区间内 PyTorch 张量显存峰值
-    total_mb: float           # 设备物理总显存
-    free_mb: float            # 物理剩余显存 (total - reserved)
+    allocated_mb: float
+    reserved_mb: float
+    max_allocated_mb: float
+    max_reserved_mb: float
+    total_mb: float
+    free_mb: float
 
 
 class GPUMonitor:
-    """基于原生 PyTorch 的 GPU 显存监控器。"""
+    """观察单个 CUDA 设备，不主动改变分配器状态。"""
 
     def __init__(self, device: str | torch.device | int = 0) -> None:
-        """初始化显存监控器。
-
-        参数：
-            device: 设备标号或名称（如 0, "cuda:0", "cpu", torch.device("cuda:0")）。
-        """
         if isinstance(device, int):
             self.device = torch.device(f"cuda:{device}")
-        elif isinstance(device, str):
+        elif isinstance(device, (str, torch.device)):
             self.device = torch.device(device)
-        elif isinstance(device, torch.device):
-            self.device = device
         else:
             raise TypeError(f"device must be int, str, or torch.device, got {type(device)}")
 
         self._is_cuda = self.device.type == "cuda" and torch.cuda.is_available()
+        if self._is_cuda and self.device.index is None:
+            self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        self.last_peak_snapshot: GPUMemorySnapshot | None = None
 
     @property
     def is_cuda(self) -> bool:
-        """当前监控设备是否为可用 CUDA 设备。"""
         return self._is_cuda
 
     def get_device_name(self) -> str:
-        """获取设备名称。"""
         if not self._is_cuda:
             return "CPU"
-        device_idx = self.device.index or 0
-        return torch.cuda.get_device_name(device_idx)
+        return torch.cuda.get_device_name(self.device)
 
     def reset_peak_stats(self) -> None:
-        """重置显存峰值统计计数器。"""
         if self._is_cuda:
             torch.cuda.reset_peak_memory_stats(self.device)
 
     def snapshot(self) -> GPUMemorySnapshot:
-        """采集当前时刻的显存状态快照。"""
+        """返回分配器用量，以及设备级的剩余/总显存。"""
         if not self._is_cuda:
-            return GPUMemorySnapshot(0.0, 0.0, 0.0, 0.0, 0.0)
+            return GPUMemorySnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-        device_idx = self.device.index or 0
-        allocated = torch.cuda.memory_allocated(device_idx) / (1024 ** 2)
-        reserved = torch.cuda.memory_reserved(device_idx) / (1024 ** 2)
-        max_allocated = torch.cuda.max_memory_allocated(device_idx) / (1024 ** 2)
-        total = torch.cuda.get_device_properties(device_idx).total_memory / (1024 ** 2)
-        free = max(0.0, total - reserved)
-
+        free, total = torch.cuda.mem_get_info(self.device)
         return GPUMemorySnapshot(
-            allocated_mb=round(allocated, 2),
-            reserved_mb=round(reserved, 2),
-            max_allocated_mb=round(max_allocated, 2),
-            total_mb=round(total, 2),
-            free_mb=round(free, 2),
+            allocated_mb=torch.cuda.memory_allocated(self.device) / _MIB,
+            reserved_mb=torch.cuda.memory_reserved(self.device) / _MIB,
+            max_allocated_mb=torch.cuda.max_memory_allocated(self.device) / _MIB,
+            max_reserved_mb=torch.cuda.max_memory_reserved(self.device) / _MIB,
+            total_mb=total / _MIB,
+            free_mb=free / _MIB,
         )
 
     @contextmanager
     def track_peak(self) -> Generator[GPUMonitor, None, None]:
-        """上下文管理器：自动在进入时重置峰值，并在退出时保留该区间的最大显存。"""
+        """进入时同步并重置统计，退出时将快照保存到 last_peak_snapshot。
+
+        峰值计数器是当前进程和设备级的，不要嵌套使用或并发重置。
+        CPU 模式下 CUDA 统计字段均为 0。
+        """
+        self.last_peak_snapshot = None
+        if self._is_cuda:
+            torch.cuda.synchronize(self.device)
         self.reset_peak_stats()
         try:
             yield self
         finally:
-            pass
+            if self._is_cuda:
+                torch.cuda.synchronize(self.device)
+            self.last_peak_snapshot = self.snapshot()

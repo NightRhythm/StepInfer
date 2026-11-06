@@ -1,34 +1,78 @@
-# 基准测试
+# StepInfer 基准测试规范与组织架构
 
-延迟脚本测量单请求生成流程。输入使用固定随机种子生成的 token ID 张量，输出长度固定，因此每个测试用例都有确定的输入形状和相同的生成步数。
+本项目遵循单一职责与数据/报告解耦原则，将性能测量脚本与原始工件清晰组织。
 
-在仓库根目录运行：
+---
 
-```bash
-uv run python benchmarks/latency_benchmark.py --warmup-runs 3 --repeats 10
+## 1. 目录结构与工件归档
+
+```text
+docs/benchmarks/
+├── baseline_benchmark.md        # 人工综合评审的主线基线报告（含深度复盘与分析）
+├── README.md                    # 本测试说明指南
+└── raw/                         # 自动化测试导出的原始数据与工件
+    ├── md/                      # 纯净的 Markdown 格式测量数据表（无冗余声明）
+    │   ├── baseline_latency_0.6b.md
+    │   ├── baseline_latency_1.7b.md
+    │   ├── baseline_profiler_0.6b.md
+    │   └── baseline_profiler_1.7b.md
+    ├── json/                    # 完整可机器解析的原始统计与逐轮数据
+    │   ├── baseline_latency_0.6b.json
+    │   └── baseline_latency_1.7b.json
+    └── traces/                  # Chrome Trace 时间线（支持 Perfetto / Chrome 交互剖析）
+        ├── baseline_trace_0.6b_prompt512.json
+        └── baseline_trace_1.7b_prompt512.json
 ```
 
-默认输入长度为 `32 64 256 512 1024`，每轮生成 32 个 token。默认报告为 `docs/benchmarks/generation-benchmark.md`，相邻的 `.json` 文件保存原始数据。可根据目标 GPU 的可用显存调整最大输入长度和输出长度。
+---
 
-可通过 `--report-path` 指定实验文件名，或在运行后重命名并补充实现状态、优化内容及分析结论；归档时保留对应的 JSON 原始数据。报告记录代码 commit 和工作区是否有未提交修改，辅助定位实验版本。
+## 2. 测量脚本与运行方式
 
-模型实现变化时仍需检查 `_run_generation()` 是否调用了预期的推理路径。报告模板与实现状态分离。
+### 2.1 延迟与吞吐量基准 (`benchmarks/latency_benchmark.py`)
 
-Profiler 模式与正式基准测试分开运行：
+专用于高精度的端到端生成延迟、吞吐率、显存分配及 MFU 测量，**完全隔离 Profiler 开销**。
 
 ```bash
-uv run python benchmarks/latency_benchmark.py --profile --prompt-lengths 512 --trace-dir traces
+# 评估 Qwen3-0.6B-Base
+uv run python benchmarks/latency_benchmark.py --model-path assets/models/Qwen3-0.6B-Base --tag 0.6b
+
+# 评估 Qwen3-1.7B-Base
+uv run python benchmarks/latency_benchmark.py --model-path assets/models/Qwen3-1.7B-Base --tag 1.7b
 ```
 
-Profiler 模式会按配置预热，为每个输入长度采集一次 trace，不写入基准测试计时结果。Chrome Trace JSON 可用 Perfetto 或 Chrome tracing 查看。每份 trace 旁边的元数据文件记录了精确的输入 token ID 和运行环境。
+主要参数：
+- `--prompt-lengths`: 输入序列长度列表，默认为 `32 64 256 512 1024`。
+- `--max-new-tokens`: 固定生成的 token 数，默认为 `32`。
+- `--warmup-runs`: 预热轮数，默认为 `3`。
+- `--repeats`: 正式测量轮数，默认为 `10`。
+- `--tag`: 产物文件标签（如 `0.6b`、`1.7b`），输出至 `raw/md/latency_<tag>.md` 和 `raw/json/latency_<tag>.json`。
 
-计时范围和指标口径：
+### 2.2 算子剖析与时间线分析 (`benchmarks/profiler_benchmark.py`)
 
-- 分词、输入传输到设备、文本解码不计入生成阶段计时；报告的负载范围是“设备上已有输入 token ID → 固定长度生成”。
-- 生成墙钟耗时包含 Python 循环开销和最后的设备同步。墙钟吞吐等于生成 token 数除以这段耗时。
-- 首 token 时间间隔和 ITL 不是端到端 TTFT。CUDA 模式使用当前流上的 Event；Event 间隔可能包含 Python 提交工作期间的设备空闲时间，并非 kernel 耗时之和。CPU 模式使用 `perf_counter`。
-- 逐 token 埋点也会带来开销。Profiler trace 用于定位可能的瓶颈，性能对比使用未开启 Profiler 的基准运行。
-- 报告包含 PyTorch 分配器的 allocated/reserved 峰值、各轮运行前基线，以及运行后的设备级剩余显存。脚本不会在测试用例之间清空缓存分配器，因此 reserved 数据受运行顺序影响，解读时应结合起始基线。
-- 汇总结果给出重复运行的中位数及观测到的最小/最大值。每轮的 ITL 分位数使用线性插值；汇总表中的分位数是各轮分位数的中位数。比较改动时应保留 JSON 原始数据。
+专用于单次典型序列推理的算子调用分解与计算图追踪，捕获算子耗时与显存事件，导出 Chrome Trace 时间线。
 
-运行成功后再保存实际基线报告，不提交占位或未经验证的性能数字。
+```bash
+# 剖析 Qwen3-0.6B-Base (Prompt 512, 单步前向)
+uv run python benchmarks/profiler_benchmark.py --model-path assets/models/Qwen3-0.6B-Base --tag 0.6b --prompt-length 512
+
+# 剖析 Qwen3-1.7B-Base (Prompt 512, 单步前向)
+uv run python benchmarks/profiler_benchmark.py --model-path assets/models/Qwen3-1.7B-Base --tag 1.7b --prompt-length 512
+```
+
+产物说明：
+- Trace 文件：输出至 `raw/traces/trace_<tag>_prompt<len>.json`，可直接拖入 [ui.perfetto.dev](https://ui.perfetto.dev) 进行交互式时间线定位与火焰图分析。
+- 剖析表格：输出至 `raw/md/profiler_<tag>.md`，包含 Top 15 算子耗时与显存开销排序。
+
+> **归档规范**：测试脚本默认生成标准的通用基础工件（`latency_*`、`profiler_*`、`trace_*`）。在阶段评审与报告归档时，人工重命名加上对应阶段前缀（如 `baseline_`、后续阶段的 `kv_cache_` 等），保持代码生成与归档记录的彻底解耦。
+
+---
+
+## 3. 指标口径与测量原则
+
+- **测量范围：** 仅包含“设备上常驻输入 token ID → 固定步数自回归生成循环”，排除了分词（Tokenize）、主机到设备拷贝（Host-to-Device Copy）和文本解码（Decode）的干扰。
+- **时间度量：** CUDA 模式下使用 `torch.cuda.Event` 精确度量首 token 间隔与逐步 ITL；吞吐量基于包含流同步的端到端生成墙钟耗时计算。
+- **MFU 计算口径：**
+  ```text
+  MFU = (2 × num_params × throughput) / (peak_tflops × 10^12) × 100%
+  ```
+- **显存度量：** 记录 PyTorch 显存分配器的已分配峰值（Peak Allocated）与相对于起点的显存增量（Peak Delta）。

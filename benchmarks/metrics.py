@@ -12,6 +12,38 @@ import torch
 
 from stepinfer.utils.gpu_monitor import GPUMonitor
 
+GPU_PEAK_TFLOPS: dict[str, dict[str, float]] = {
+    "rtx 5060 ti": {"fp32": 22.5, "bf16": 45.0, "fp16": 45.0},
+    "rtx 4090": {"fp32": 82.6, "tf32": 165.0, "fp16": 330.0, "bf16": 330.0},
+    "rtx 3090": {"fp32": 35.6, "tf32": 71.0, "fp16": 142.0, "bf16": 142.0},
+    "a100": {"fp32": 19.5, "tf32": 156.0, "fp16": 312.0, "bf16": 312.0},
+    "h100": {"fp32": 67.0, "tf32": 990.0, "fp16": 1979.0, "bf16": 1979.0},
+    "h200": {"fp32": 67.0, "tf32": 990.0, "fp16": 1979.0, "bf16": 1979.0},
+    "l40s": {"fp32": 91.6, "tf32": 183.0, "fp16": 362.0, "bf16": 362.0},
+}
+
+
+def get_peak_tflops(device: torch.device | str, dtype: torch.dtype) -> float | None:
+    """根据 GPU 型号与数据类型返回理论密集 TFLOPS 峰值。"""
+    target_device = torch.device(device)
+    if target_device.type != "cuda" or not torch.cuda.is_available():
+        return None
+
+    dtype_map = {
+        torch.float32: "fp32",
+        torch.float16: "fp16",
+        torch.bfloat16: "bf16",
+    }
+    dtype_key = dtype_map.get(dtype)
+    if dtype_key is None:
+        return None
+
+    device_name = torch.cuda.get_device_name(target_device).lower()
+    for model_key, tflops_table in GPU_PEAK_TFLOPS.items():
+        if model_key in device_name:
+            return tflops_table.get(dtype_key)
+    return None
+
 
 @dataclass(frozen=True)
 class BenchmarkResult:
@@ -35,6 +67,7 @@ class BenchmarkResult:
     peak_reserved_mb: float
     peak_reserved_delta_mb: float
     device_free_after_mb: float
+    mfu_percent: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -43,10 +76,11 @@ class BenchmarkResult:
         def fmt(value: float | None) -> str:
             return "N/A" if value is None else f"{value:.2f}"
 
+        mfu_str = f" | MFU: {self.mfu_percent:.2f}%" if self.mfu_percent is not None else ""
         return (
             f"Prompt: {self.prompt_tokens} tokens | Generated: {self.generated_tokens} tokens\n"
             f"Generation wall time: {self.generation_wall_time_sec:.3f} s | "
-            f"Wall throughput: {self.generation_wall_throughput_tok_per_sec:.2f} tok/s\n"
+            f"Wall throughput: {self.generation_wall_throughput_tok_per_sec:.2f} tok/s{mfu_str}\n"
             f"First-token interval: {self.first_token_interval_ms:.2f} ms | "
             f"Avg ITL: {fmt(self.avg_itl_ms)} ms "
             f"(P50: {fmt(self.p50_itl_ms)} ms, "
@@ -62,7 +96,14 @@ class BenchmarkResult:
 class BenchmarkTracker:
     """测量模型生成墙钟耗时和逐 token 的设备时间间隔。"""
 
-    def __init__(self, device: str | torch.device = "cuda:0") -> None:
+    def __init__(
+        self,
+        device: str | torch.device = "cuda:0",
+        *,
+        num_params: int = 0,
+        dtype: torch.dtype = torch.float32,
+        peak_tflops: float | None = None,
+    ) -> None:
         self.device = torch.device(device)
         if self.device.type not in ("cpu", "cuda"):
             raise ValueError("Only CPU and CUDA timing are supported.")
@@ -73,6 +114,9 @@ class BenchmarkTracker:
                 self.device = torch.device("cuda", torch.cuda.current_device())
         self.use_cuda = self.device.type == "cuda" and torch.cuda.is_available()
         self.gpu_monitor = GPUMonitor(self.device)
+        self.num_params = num_params
+        self.dtype = dtype
+        self.peak_tflops = peak_tflops if peak_tflops is not None else get_peak_tflops(self.device, self.dtype)
         self._started = False
         self._wall_start = 0.0
         self._wall_end: float | None = None
@@ -168,6 +212,18 @@ class BenchmarkTracker:
             generated_tokens = len(intervals)
             throughput = generated_tokens / wall_time if wall_time > 0 else 0.0
 
+            mfu_percent: float | None = None
+            if (
+                self.peak_tflops is not None
+                and self.peak_tflops > 0
+                and self.num_params > 0
+                and throughput > 0
+            ):
+                mfu_percent = round(
+                    (2.0 * self.num_params * throughput) / (self.peak_tflops * 1e12) * 100.0,
+                    2,
+                )
+
             return BenchmarkResult(
                 prompt_tokens=prompt_tokens,
                 generated_tokens=generated_tokens,
@@ -191,6 +247,7 @@ class BenchmarkTracker:
                     max(0.0, snapshot.max_reserved_mb - self._reserved_before_mb), 2
                 ),
                 device_free_after_mb=snapshot.free_mb,
+                mfu_percent=mfu_percent,
             )
         finally:
             self._started = False
@@ -210,6 +267,7 @@ def aggregate_results(results: list[BenchmarkResult]) -> dict[str, dict[str, flo
         "p90_itl_ms",
         "p99_itl_ms",
         "generation_wall_throughput_tok_per_sec",
+        "mfu_percent",
         "peak_allocated_mb",
         "peak_allocated_delta_mb",
         "peak_reserved_mb",

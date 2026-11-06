@@ -113,6 +113,23 @@ def test_aggregate_results():
         aggregate_results([])
 
 
+def test_benchmark_tracker_mfu_calculation():
+    # 模拟已知 peak_tflops 和 num_params 的 MFU 计算
+    tracker = BenchmarkTracker(
+        device="cpu",
+        num_params=500_000_000,
+        peak_tflops=10.0,
+    )
+    tracker.start()
+    time.sleep(0.01)
+    tracker.record_step()
+    res = tracker.finish(prompt_tokens=10)
+
+    assert res.mfu_percent is not None
+    assert res.mfu_percent > 0.0
+    assert "MFU:" in res.summary()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for this test")
 def test_benchmark_tracker_cuda_lifecycle():
     tracker = BenchmarkTracker(device="cuda:0")

@@ -65,3 +65,11 @@
 - ✅ 实现 `benchmarks/latency_benchmark.py`（固定 token-ID 输入和输出长度，支持逐 case 预热、重复测量、独立 profiler 模式与 JSON/Markdown 结果）
 - ✅ 将基准运行说明和报告默认输出目录设为 `docs/benchmarks/`
 - ⬜ 待在目标开发服务器上验证最新实现、确认兼容性并记录真实基线数据
+
+### day 9
+
+- ✅ 拆分独立的性能剖析脚本 `benchmarks/profiler_benchmark.py`（解耦算子剖析与延迟测量，优化采样策略并支持导出轻量 Chrome Trace）
+- ✅ 整理延迟测试脚本 `benchmarks/latency_benchmark.py`（剥离 profiler 采样逻辑，聚焦纯净的端到端延迟、吞吐与显存测量）
+- ✅ 重构基准测试指标 `benchmarks/metrics.py`（引入常见 GPU 理论峰值算力表，支持科学估算 MFU 并补充单元测试）
+- ✅ 完成真实环境基线性能实测（在 RTX 5060 Ti 上完成 Qwen3-0.6B 与 1.7B 多序列长度评测并归档测试工件）
+- ✅ 编写基线评测分析报告 `docs/benchmarks/baseline_benchmark.md`（汇编实测数据，深入剖析无 KV Cache 架构下的二次方计算膨胀、访存瓶颈与算子同步开销）

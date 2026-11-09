@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 
+from stepinfer.cache.kv_cache import KVCache, LayerKVCache
 from stepinfer.config.qwen3_config import Qwen3Config
 from stepinfer.layers.activation import SiluAndMul
 from stepinfer.layers.attention import CausalAttention
@@ -104,12 +105,14 @@ class Qwen3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        layer_cache: LayerKVCache | None = None,
     ) -> torch.Tensor:
         """前向传播计算。
 
         参数:
             positions (torch.Tensor): 1D [seq_len] 或 2D [batch, seq_len] 的绝对位置索引
             hidden_states (torch.Tensor): 形状为 [batch_size, seq_len, hidden_size]
+            layer_cache (LayerKVCache | None): 当前层的键值缓存管理实例
 
         返回:
             torch.Tensor: 形状为 [batch_size, seq_len, hidden_size]
@@ -134,13 +137,22 @@ class Qwen3Attention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        # 4. RoPE 旋转位置编码
+        # 4. RoPE 旋转位置编码 (重要: 必须先旋转再写入 Cache)
         q, k = self.rotary_emb(positions, q, k)
 
-        # 5. 点积因果自注意力
+        # 5. KV Cache 缓存存取更新 (若启用)
+        if layer_cache is not None:
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            k, v = layer_cache.update(k, v)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            
+
+        # 6. 点积因果自注意力
         attn_out = self.attn(q, k, v)
 
-        # 6. 展平并映射输出
+        # 7. 展平并映射输出
         attn_out = attn_out.flatten(2, 3)
         return self.o_proj(attn_out)
 
@@ -163,6 +175,7 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        layer_cache: LayerKVCache | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """前向传播计算。
 
@@ -170,6 +183,7 @@ class Qwen3DecoderLayer(nn.Module):
             positions (torch.Tensor): 位置索引张量
             hidden_states (torch.Tensor): 输入隐藏状态 [batch, seq_len, hidden_size]
             residual (torch.Tensor | None): 上一层累加传递下来的残差张量
+            layer_cache (LayerKVCache | None): 本层的键值缓存管理实例
 
         返回:
             tuple[torch.Tensor, torch.Tensor]:
@@ -184,7 +198,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # 2. Self-Attention 前向
-        hidden_states = self.self_attn(positions, hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states, layer_cache=layer_cache)
 
         # 3. Post-Attention RMSNorm (融合残差累加)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -211,12 +225,14 @@ class Qwen3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
+        kv_cache: KVCache | None = None,
     ) -> torch.Tensor:
         """模型主干前向传播。
 
         参数:
             input_ids (torch.Tensor): 输入 Token ID，形状 [batch_size, seq_len]
             positions (torch.Tensor | None): 可选位置索引，为 None 时自动生成 [0, 1, ..., seq_len - 1]
+            kv_cache (KVCache | None): 全层键值缓存管理容器
 
         返回:
             torch.Tensor: 最终归一化后的隐藏状态，形状 [batch_size, seq_len, hidden_size]
@@ -237,8 +253,14 @@ class Qwen3Model(nn.Module):
 
         # 2. 逐层前向传递并累加残差
         residual = None
-        for layer in self.layers:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+        for layer_idx, layer in enumerate(self.layers):
+            layer_cache = kv_cache[layer_idx] if kv_cache is not None else None
+            hidden_states, residual = layer(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                layer_cache=layer_cache,
+            )
 
         # 3. 最终层归一化与残差融合
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -262,16 +284,18 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
+        kv_cache: KVCache | None = None,
     ) -> torch.Tensor:
         """端到端因果语言模型前向计算。
 
         参数:
             input_ids (torch.Tensor): 输入 Token 序列，形状 [batch_size, seq_len]
             positions (torch.Tensor | None): 可选位置索引
+            kv_cache (KVCache | None): 全层键值缓存容器
 
         返回:
             torch.Tensor: 输出预测 Logits，形状 [batch_size, seq_len, vocab_size]
         """
-        hidden_states = self.model(input_ids, positions)
+        hidden_states = self.model(input_ids, positions, kv_cache=kv_cache)
         logits = self.lm_head(hidden_states)
         return logits

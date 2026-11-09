@@ -1,7 +1,6 @@
 """带因果掩码 (Causal Mask) 与 GQA (Grouped Query Attention) 支持的纯点积注意力算子实现。"""
 
 import math
-from ipykernel.utils import V
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -90,9 +89,14 @@ class CausalAttention(nn.Module):
         _, k_seq_len, k_heads, k_dim = k.shape
         _, v_seq_len, v_heads, v_dim = v.shape
 
-        if seq_len != k_seq_len or seq_len != v_seq_len:
+        if k_seq_len != v_seq_len:
             raise ValueError(
-                f"Sequence lengths do not match: q={seq_len}, k={k_seq_len}, v={v_seq_len}."
+                f"Sequence lengths do not match: Key ({k_seq_len}) and Value ({v_seq_len}) mismatch."
+            )
+
+        if seq_len > k_seq_len:
+            raise ValueError(
+                f"Query sequence length ({seq_len}) cannot exceed key sequence length ({k_seq_len})."
             )
 
         if q_heads != self.num_heads or k_heads != self.num_kv_heads or v_heads != self.num_kv_heads:
@@ -116,14 +120,17 @@ class CausalAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # 3. 缩放点积与因果掩码遮蔽
+        # 3. 缩放点积与因果掩码遮蔽 (Q @ K^T 得到 [batch, num_heads, seq_len, k_seq_len])
         scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool),
-            diagonal=1,
-        )
-        scores = scores.masked_fill(causal_mask, torch.finfo(scores.dtype).min)
+        # Prefill 阶段 (seq_len > 1) 构造自适应矩形因果掩码；Decode 阶段 (seq_len == 1) 完全免掩码
+        if seq_len > 1:
+            causal_mask = torch.triu(
+                torch.ones(seq_len, k_seq_len, device=q.device, dtype=torch.bool),
+                diagonal=1 + (k_seq_len - seq_len),
+            )
+            scores = scores.masked_fill(causal_mask, torch.finfo(scores.dtype).min)
+
 
         # 4. 权重归一化与加权求和
         attn_probs = F.softmax(scores, dim=-1)

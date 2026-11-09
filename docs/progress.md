@@ -73,3 +73,16 @@
 - ✅ 重构基准测试指标 `benchmarks/metrics.py`（引入常见 GPU 理论峰值算力表，支持科学估算 MFU 并补充单元测试）
 - ✅ 完成真实环境基线性能实测（在 RTX 5060 Ti 上完成 Qwen3-0.6B 与 1.7B 多序列长度评测并归档测试工件）
 - ✅ 编写基线评测分析报告 `docs/benchmarks/baseline_benchmark.md`（汇编实测数据，深入剖析无 KV Cache 架构下的二次方计算膨胀、访存瓶颈与算子同步开销）
+
+## Step 2
+
+### day 10
+
+- ✅ 实现 `src/stepinfer/cache/kv_cache.py`（静态连续预分配张量 `[batch, num_kv_heads, max_seq_len, head_dim]`、就地切片原地更新与全层 `KVCache` 容器化管理）
+- ✅ 编写 `tests/test_kv_cache.py`（覆盖 Prefill 批量写入、Decode 逐步单 Token 追加、切片形状、游标重置与容量溢出边界拦截）
+- ✅ 改造 `src/stepinfer/layers/attention.py`（放宽注意力长度断言，引入通用矩形因果掩码自适应对角线偏移，Decode 阶段单步免掩码）
+- ✅ 改造 `src/stepinfer/models/qwen3.py`（实现全模型 4 级参数全链路穿透，在 RoPE 旋转后与 GQA 广播前以原生 8 头存入 Cache，节约 50% 显存）
+- ✅ 重构 `src/stepinfer/inference/generator.py`（将自回归生成状态机解耦为首步 Prefill 与后续单步 Decode，实现单步解码延迟由 $O(N^2)$ 降至 $O(1)$ 并兼容无 Cache 回退）
+- ✅ 编写并运行回归与端到端测试（全仓库 109 项单元测试 100% 通过，在 CPU 与真实 GPU 上验证自回归生成的正确性与确定性）
+- ⬜ 待运行延迟基准测试与性能对比（运行 `benchmarks/latency_benchmark.py` 实测评估引入 KV Cache 后的 ITL 延迟与吞吐提升）
+

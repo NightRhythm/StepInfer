@@ -22,6 +22,7 @@ if str(_src_dir) not in sys.path:
 
 import torch
 
+from stepinfer.cache.kv_cache import KVCache
 from stepinfer.config.model_config import ModelConfig
 from stepinfer.config.qwen3_config import Qwen3Config
 from stepinfer.inference.sampler import sample_next_token
@@ -38,13 +39,42 @@ def _run_generation(
     prompt_ids: torch.Tensor,
     *,
     max_new_tokens: int,
+    use_cache: bool = True,
 ) -> torch.Tensor:
     input_ids = prompt_ids
+    prompt_len = prompt_ids.shape[-1]
+    device = prompt_ids.device
+
+    kv_cache = None
+    if use_cache:
+        model_dtype = next(model.parameters()).dtype
+        kv_cache = KVCache.from_config(
+            config=model.config,
+            max_batch_size=1,
+            max_seq_len=prompt_len + max_new_tokens,
+            dtype=model_dtype,
+            device=device,
+        )
+
     with torch.inference_mode():
-        for _ in range(max_new_tokens):
-            logits = model(input_ids)
+        if use_cache and kv_cache is not None:
+            # 1. Prefill 阶段
+            positions = torch.arange(prompt_len, device=device)
+            logits = model(input_ids, positions=positions, kv_cache=kv_cache)
             next_token = sample_next_token(logits[:, -1, :], method="greedy")
             input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
+
+            # 2. Decode 阶段
+            for _ in range(max_new_tokens - 1):
+                curr_pos = torch.tensor([kv_cache[0].current_length], device=device)
+                logits = model(next_token.view(1, 1), positions=curr_pos, kv_cache=kv_cache)
+                next_token = sample_next_token(logits[:, -1, :], method="greedy")
+                input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
+        else:
+            for _ in range(max_new_tokens):
+                logits = model(input_ids)
+                next_token = sample_next_token(logits[:, -1, :], method="greedy")
+                input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
 
     if prompt_ids.device.type == "cuda":
         torch.cuda.synchronize(prompt_ids.device)
@@ -99,12 +129,15 @@ def _render_profiler_report(
     prompt_length: int,
     max_new_tokens: int,
     profiler: TorchProfiler,
-    trace_rel_path: str,
+    trace_rel_path: str | None = None,
     top_n: int = 15,
+    use_cache: bool = True,
 ) -> str:
     is_cuda = device.type == "cuda" and torch.cuda.is_available()
     device_name = torch.cuda.get_device_name(device) if is_cuda else "CPU"
     dtype_str = "bf16" if dtype == torch.bfloat16 else ("fp16" if dtype == torch.float16 else "fp32")
+    cache_str = "Static pre-allocated (in-place slicing)" if use_cache else "None"
+    trace_display = f"[`{trace_rel_path}`]({trace_rel_path})" if trace_rel_path else "None (disabled)"
 
     lines = [
         f"# Profiler Breakdown — {model_name}",
@@ -119,9 +152,10 @@ def _render_profiler_report(
         f"| Device | {device_name} |",
         f"| PyTorch | {torch.__version__} |",
         f"| Python | {platform.python_version()} |",
+        f"| KV Cache | {cache_str} |",
         f"| Prompt Tokens | {prompt_length} |",
         f"| Generated Tokens | {max_new_tokens} |",
-        f"| Chrome Trace | [`{trace_rel_path}`]({trace_rel_path}) |",
+        f"| Chrome Trace | {trace_display} |",
         "",
         "---",
         "",
@@ -193,7 +227,9 @@ def run_profiler_benchmark(
     seed: int = 42,
     tag: str | None = None,
     raw_dir: Path = Path("docs/benchmarks/raw"),
-) -> tuple[Path, Path]:
+    use_cache: bool = True,
+    save_trace: bool = True,
+) -> tuple[Path | None, Path]:
     if prompt_length <= 0:
         raise ValueError("prompt_length must be positive")
     if max_new_tokens <= 0:
@@ -222,7 +258,7 @@ def run_profiler_benchmark(
     tokenizer = HFTokenizer(ModelConfig(name=model_path.name, model_dir=model_path))
 
     num_params = sum(p.numel() for p in model.parameters())
-    logger.info("Model ready: %d parameters, device=%s, dtype=%s", num_params, target_device, dtype)
+    logger.info("Model ready: %d parameters, device=%s, dtype=%s, use_cache=%s", num_params, target_device, dtype, use_cache)
 
     prompt_ids = _make_prompt_ids(
         length=prompt_length,
@@ -233,39 +269,45 @@ def run_profiler_benchmark(
 
     for i in range(warmup_runs):
         logger.info("Warmup run %d/%d (not profiled)...", i + 1, warmup_runs)
-        out = _run_generation(model, prompt_ids, max_new_tokens=max_new_tokens)
+        out = _run_generation(model, prompt_ids, max_new_tokens=max_new_tokens, use_cache=use_cache)
         tokenizer.decode(out[0].tolist())
         del out
 
     logger.info(
-        "Starting Profiler for %s (prompt_length=%d, max_new_tokens=%d)...",
+        "Starting Profiler for %s (prompt_length=%d, max_new_tokens=%d, use_cache=%s)...",
         model_path.name,
         prompt_length,
         max_new_tokens,
+        use_cache,
     )
 
     profiler = TorchProfiler(use_cuda=use_cuda, record_shapes=True, profile_memory=True)
     with profiler:
-        out = _run_generation(model, prompt_ids, max_new_tokens=max_new_tokens)
+        out = _run_generation(model, prompt_ids, max_new_tokens=max_new_tokens, use_cache=use_cache)
         tokenizer.decode(out[0].tolist())
         del out
 
     resolved_raw_dir = raw_dir if raw_dir.is_absolute() else _repo_root / raw_dir
-    traces_dir = resolved_raw_dir / "traces"
     md_dir = resolved_raw_dir / "md"
-    traces_dir.mkdir(parents=True, exist_ok=True)
     md_dir.mkdir(parents=True, exist_ok=True)
 
-    trace_path = traces_dir / f"trace_{model_tag}_prompt{prompt_length}.json"
-    md_path = md_dir / f"profiler_{model_tag}.md"
+    md_prefix = "kvcache" if use_cache else "baseline"
+    md_name = f"{md_prefix}_profiler_{model_tag}.md" if not model_tag.startswith(md_prefix) else f"profiler_{model_tag}.md"
+    md_path = md_dir / md_name
 
-    profiler.export_chrome_trace(trace_path)
-    logger.info("Exported Chrome trace to %s", trace_path)
-
-    try:
-        trace_rel_for_md = f"../traces/{trace_path.name}"
-    except ValueError:
-        trace_rel_for_md = str(trace_path)
+    trace_path: Path | None = None
+    trace_rel_for_md: str | None = None
+    if save_trace:
+        traces_dir = resolved_raw_dir / "traces"
+        traces_dir.mkdir(parents=True, exist_ok=True)
+        trace_name = f"{md_prefix}_trace_{model_tag}_prompt{prompt_length}.json" if not model_tag.startswith(md_prefix) else f"trace_{model_tag}_prompt{prompt_length}.json"
+        trace_path = traces_dir / trace_name
+        profiler.export_chrome_trace(trace_path)
+        logger.info("Exported Chrome trace to %s", trace_path)
+        try:
+            trace_rel_for_md = f"../traces/{trace_path.name}"
+        except ValueError:
+            trace_rel_for_md = str(trace_path)
 
     report = _render_profiler_report(
         model_name=model_path.name,
@@ -277,6 +319,7 @@ def run_profiler_benchmark(
         profiler=profiler,
         trace_rel_path=trace_rel_for_md,
         top_n=15,
+        use_cache=use_cache,
     )
     md_path.write_text(report, encoding="utf-8")
     logger.info("Saved profiler markdown to %s", md_path)
@@ -324,6 +367,16 @@ def main() -> None:
         default=Path("docs/benchmarks/raw"),
         help="Raw benchmark artifacts root directory",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable KV Cache to profile baseline recalculation",
+    )
+    parser.add_argument(
+        "--no-trace",
+        action="store_true",
+        help="Skip exporting Chrome trace json file",
+    )
 
     args = parser.parse_args()
     run_profiler_benchmark(
@@ -335,6 +388,8 @@ def main() -> None:
         seed=args.seed,
         tag=args.tag,
         raw_dir=args.raw_dir,
+        use_cache=not args.no_cache,
+        save_trace=not args.no_trace,
     )
 
 

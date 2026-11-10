@@ -26,6 +26,7 @@ if str(_src_dir) not in sys.path:
 import torch
 
 from benchmarks.metrics import BenchmarkResult, BenchmarkTracker, aggregate_results, get_peak_tflops
+from stepinfer.cache.kv_cache import KVCache
 from stepinfer.config.model_config import ModelConfig
 from stepinfer.config.qwen3_config import Qwen3Config
 from stepinfer.inference.sampler import sample_next_token
@@ -44,6 +45,7 @@ def _run_generation(
     *,
     max_new_tokens: int,
     tracker: BenchmarkTracker | None = None,
+    use_cache: bool = True,
 ) -> tuple[torch.Tensor, BenchmarkResult | None]:
     """从精确的 token ID 执行固定长度贪心解码。
 
@@ -51,16 +53,48 @@ def _run_generation(
     关闭 EOS 停止，使每次实验执行相同数量的生成步骤。
     """
     input_ids = prompt_ids
+    prompt_len = prompt_ids.shape[-1]
+    device = prompt_ids.device
+
+    kv_cache = None
+    if use_cache:
+        model_dtype = next(model.parameters()).dtype
+        kv_cache = KVCache.from_config(
+            config=model.config,
+            max_batch_size=1,
+            max_seq_len=prompt_len + max_new_tokens,
+            dtype=model_dtype,
+            device=device,
+        )
+
     if tracker is not None:
         tracker.start()
 
     with torch.inference_mode():
-        for _ in range(max_new_tokens):
-            logits = model(input_ids)
+        if use_cache and kv_cache is not None:
+            # 1. Prefill 阶段
+            positions = torch.arange(prompt_len, device=device)
+            logits = model(input_ids, positions=positions, kv_cache=kv_cache)
             next_token = sample_next_token(logits[:, -1, :], method="greedy")
             input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
             if tracker is not None:
                 tracker.record_step()
+
+            # 2. Decode 阶段
+            for _ in range(max_new_tokens - 1):
+                curr_pos = torch.tensor([kv_cache[0].current_length], device=device)
+                logits = model(next_token.view(1, 1), positions=curr_pos, kv_cache=kv_cache)
+                next_token = sample_next_token(logits[:, -1, :], method="greedy")
+                input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
+                if tracker is not None:
+                    tracker.record_step()
+        else:
+            for _ in range(max_new_tokens):
+                logits = model(input_ids)
+                next_token = sample_next_token(logits[:, -1, :], method="greedy")
+                input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
+                if tracker is not None:
+                    tracker.record_step()
 
     if tracker is None:
         if prompt_ids.device.type == "cuda":
@@ -107,11 +141,13 @@ def _render_report(
     peak_tflops: float | None,
     prompt_lengths: list[int],
     runs_by_length: dict[int, list[BenchmarkResult]],
+    use_cache: bool = True,
 ) -> str:
     is_cuda = device.type == "cuda" and torch.cuda.is_available()
     device_name = torch.cuda.get_device_name(device) if is_cuda else "CPU"
     dtype_str = "bf16" if dtype == torch.bfloat16 else ("fp16" if dtype == torch.float16 else "fp32")
     peak_tflops_str = f"{peak_tflops:.1f}" if peak_tflops is not None else "N/A"
+    cache_str = "Static pre-allocated (in-place slicing)" if use_cache else "None"
 
     lines = [
         f"# Latency Benchmark — {model_name}",
@@ -127,7 +163,7 @@ def _render_report(
         f"| Peak TFLOPS ({dtype_str}) | {peak_tflops_str} |",
         f"| PyTorch | {torch.__version__} |",
         f"| Python | {platform.python_version()} |",
-        "| KV Cache | None |",
+        f"| KV Cache | {cache_str} |",
         "| Batching | Single request |",
         "| Sampling | Greedy (argmax) |",
         "",
@@ -186,7 +222,9 @@ def run_latency_benchmark(
     seed: int = 42,
     tag: str | None = None,
     raw_dir: Path = Path("docs/benchmarks/raw"),
-) -> tuple[Path, Path]:
+    use_cache: bool = True,
+    save_json: bool = True,
+) -> tuple[Path, Path | None]:
     if not prompt_lengths or any(length <= 0 for length in prompt_lengths):
         raise ValueError("prompt_lengths must contain positive lengths")
     if max_new_tokens <= 0:
@@ -227,11 +265,12 @@ def run_latency_benchmark(
     peak_tflops = get_peak_tflops(target_device, dtype) if use_cuda else None
 
     logger.info(
-        "Model ready: %d parameters, device=%s, dtype=%s, peak_tflops=%s",
+        "Model ready: %d parameters, device=%s, dtype=%s, peak_tflops=%s, use_cache=%s",
         num_params,
         target_device,
         dtype,
         peak_tflops,
+        use_cache,
     )
 
     torch.manual_seed(seed)
@@ -268,6 +307,7 @@ def run_latency_benchmark(
         "warmup_runs": warmup_runs,
         "repeats": repeats,
         "batch_size": 1,
+        "kv_cache": "static_preallocated" if use_cache else "none",
         "ignore_eos": True,
         "scope": "resident input IDs -> fixed-length generation; excludes text encode/decode",
         "timing_backend": "cuda_event" if use_cuda else "cpu_perf_counter",
@@ -288,7 +328,7 @@ def run_latency_benchmark(
 
         for warmup_index in range(warmup_runs):
             logger.info("Warmup %d/%d for prompt length %d", warmup_index + 1, warmup_runs, length)
-            warmup_ids, _ = _run_generation(model, prompt_ids, max_new_tokens=max_new_tokens)
+            warmup_ids, _ = _run_generation(model, prompt_ids, max_new_tokens=max_new_tokens, use_cache=use_cache)
             tokenizer.decode(warmup_ids.squeeze(0).tolist())
             del warmup_ids
 
@@ -305,6 +345,7 @@ def run_latency_benchmark(
                 prompt_ids,
                 max_new_tokens=max_new_tokens,
                 tracker=tracker,
+                use_cache=use_cache,
             )
             tokenizer.decode(generated_ids.squeeze(0).tolist())
             del generated_ids
@@ -330,35 +371,41 @@ def run_latency_benchmark(
         peak_tflops=peak_tflops,
         prompt_lengths=prompt_lengths,
         runs_by_length=runs_by_length,
+        use_cache=use_cache,
     )
 
     resolved_raw_dir = raw_dir if raw_dir.is_absolute() else _repo_root / raw_dir
     md_dir = resolved_raw_dir / "md"
-    json_dir = resolved_raw_dir / "json"
     md_dir.mkdir(parents=True, exist_ok=True)
-    json_dir.mkdir(parents=True, exist_ok=True)
 
-    md_path = md_dir / f"latency_{model_tag}.md"
-    json_path = json_dir / f"latency_{model_tag}.json"
-
+    md_prefix = "kvcache" if use_cache else "baseline"
+    md_filename = f"{md_prefix}_latency_{model_tag}.md" if not model_tag.startswith(md_prefix) else f"latency_{model_tag}.md"
+    md_path = md_dir / md_filename
     md_path.write_text(report, encoding="utf-8")
-    json_payload = {
-        "schema_version": 1,
-        "metadata": metadata,
-        "cases": [
-            {
-                "prompt_tokens": length,
-                "prompt_ids": prompts_by_length[length],
-                "runs": [result.to_dict() for result in runs_by_length[length]],
-                "summary": aggregate_results(runs_by_length[length]),
-            }
-            for length in prompt_lengths
-        ],
-    }
-    json_path.write_text(json.dumps(json_payload, indent=2, allow_nan=False), encoding="utf-8")
-
     logger.info("Saved raw latency markdown to %s", md_path)
-    logger.info("Saved raw latency JSON to %s", json_path)
+
+    json_path = None
+    if save_json:
+        json_dir = resolved_raw_dir / "json"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        json_filename = f"{md_prefix}_latency_{model_tag}.json" if not model_tag.startswith(md_prefix) else f"latency_{model_tag}.json"
+        json_path = json_dir / json_filename
+        json_payload = {
+            "schema_version": 1,
+            "metadata": metadata,
+            "cases": [
+                {
+                    "prompt_tokens": length,
+                    "prompt_ids": prompts_by_length[length],
+                    "runs": [result.to_dict() for result in runs_by_length[length]],
+                    "summary": aggregate_results(runs_by_length[length]),
+                }
+                for length in prompt_lengths
+            ],
+        }
+        json_path.write_text(json.dumps(json_payload, indent=2, allow_nan=False), encoding="utf-8")
+        logger.info("Saved raw latency JSON to %s", json_path)
+
     print("\n" + report)
     return md_path, json_path
 
@@ -417,6 +464,16 @@ def main() -> None:
         default=Path("docs/benchmarks/raw"),
         help="Raw benchmark artifacts root directory",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable KV Cache to run baseline full recalculation",
+    )
+    parser.add_argument(
+        "--no-json",
+        action="store_true",
+        help="Skip saving JSON raw artifacts, keep only Markdown",
+    )
 
     args = parser.parse_args()
     run_latency_benchmark(
@@ -429,6 +486,8 @@ def main() -> None:
         seed=args.seed,
         tag=args.tag,
         raw_dir=args.raw_dir,
+        use_cache=not args.no_cache,
+        save_json=not args.no_json,
     )
 
 

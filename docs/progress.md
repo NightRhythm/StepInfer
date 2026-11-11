@@ -86,3 +86,13 @@
 - ✅ 编写并运行回归与端到端测试（全仓库 109 项单元测试 100% 通过，在 CPU 与真实 GPU 上验证自回归生成的正确性与确定性）
 - ⬜ 待运行延迟基准测试与性能对比（运行 `benchmarks/latency_benchmark.py` 实测评估引入 KV Cache 后的 ITL 延迟与吞吐提升）
 
+### day 11
+
+- ✅ 改造性能基准测试工具 `benchmarks/latency_benchmark.py` 与 `benchmarks/profiler_benchmark.py`（适配两阶段 KV Cache 推理，增加 `--no-json` 与 `--no-trace` 参数以产出纯净 Markdown 工件）
+- ✅ 完成真实环境 KV Cache 性能实测（在 RTX 5060 Ti 上完成 Qwen3-0.6B 端到端延迟、吞吐率与 Profiler 算子剖析并归档测试工件）
+- ✅ 改造 `src/stepinfer/tokenizer/hf_tokenizer.py`（统一 `encode` 与 `decode` 原生多态支持 `str | list[str]`，批量输入默认采用左填充 `padding_side="left"` 并产出对齐的 `attention_mask`）
+- ✅ 改造 `src/stepinfer/layers/attention.py`（支持 2D `padding_mask` 穿透，使用 `torch.finfo(scores.dtype).min` 掩码填充，彻底根除全 PAD 行的 Softmax NaN 隐患）
+- ✅ 改造 `src/stepinfer/models/qwen3.py`（全模型穿透传递 `padding_mask`，未显式传入 positions 时自动采用 `(mask.cumsum - 1).clamp(min=0)` 向量化推导 2D RoPE 绝对位置）
+- ✅ 重构 `src/stepinfer/inference/generator.py`（放开 `batch_size == 1` 限制，设计精细的 `prev_finished` 状态机以保留触发 EOS 的有效 Token，并在后续陪跑步骤将输出冻结为 `pad_token_id`）
+- ✅ 改造 `src/stepinfer/inference/inference_engine.py`（统一对外 `generate` 接口支持单条与批量输入，批量模式下按序列独立解码并过滤 Special Token）
+- ✅ 编写 `tests/test_batch_inference.py`（全仓库 115 项单元测试 100% 绿灯，严格验证左填充结构、防 NaN、多序列独立停止以及单条 vs 批处理一致性金标准测试）

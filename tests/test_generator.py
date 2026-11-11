@@ -76,7 +76,7 @@ def test_generator_stops_at_max_new_tokens_and_reprocesses_full_sequence():
     [
         ("not a tensor", 2, TypeError),
         (torch.empty((1, 0), dtype=torch.long), 2, ValueError),
-        (torch.empty((2, 3), dtype=torch.long), 2, ValueError),
+        (torch.empty((1, 2, 3), dtype=torch.long), 2, ValueError),
         (torch.tensor([[1, 2]]), 0, ValueError),
     ],
 )

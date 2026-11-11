@@ -52,73 +52,98 @@ class InferenceEngine:
         self.model = self.model.to(self.device)
         self.model.eval()
 
-    def encode(self, text: str) -> Tensor:
-        """将单条输入文本编码为模型输入的 token IDs。
+    def encode(self, text: str | list[str]) -> Tensor | tuple[Tensor, Tensor]:
+        """将单条或批量输入文本编码为模型输入的 token IDs (单条) 或 (token IDs, padding mask) (批量)。
 
         异常：
-            TypeError: text 类型不正确，或 tokenizer 返回的结果不是 Tensor。
-            ValueError: 编码结果的形状不符合单条模型输入要求。
-
+            TypeError: text 类型不正确，或 tokenizer 返回的结果类型不匹配。
+            ValueError: 文本为空、包含空白字符，或编码结果形状不合法。
         """
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
+        if not isinstance(text, (str, list)):
+            raise TypeError("text must be a string or a list of strings")
 
-        input_ids = self.tokenizer.encode(text=text, return_tensors="pt")
-        if not isinstance(input_ids, Tensor):
-            raise TypeError("tokenizer.encode() must return a torch.Tensor")
-        if (
-            input_ids.ndim != 2
-            or input_ids.shape[0] != 1
-            or input_ids.shape[1] == 0
-        ):
-            raise ValueError(
-                "tokenizer.encode() must return a non-empty tensor with shape "
-                "[1, sequence_length]"
+        if isinstance(text, str):
+            if not text.strip():
+                raise ValueError("text cannot be empty or whitespace-only")
+
+            input_ids = self.tokenizer.encode(text=text, return_tensors="pt")
+            if not isinstance(input_ids, Tensor):
+                raise TypeError("tokenizer.encode() must return a torch.Tensor")
+            if (
+                input_ids.ndim != 2
+                or input_ids.shape[0] != 1
+                or input_ids.shape[1] == 0
+            ):
+                raise ValueError(
+                    "tokenizer.encode() must return a non-empty tensor with shape "
+                    "[1, sequence_length]"
+                )
+
+            return input_ids
+
+        # 批量文本处理
+        if not text:
+            raise ValueError("texts cannot be empty")
+        for t in text:
+            if not isinstance(t, str):
+                raise TypeError("All items in texts must be strings")
+            if not t.strip():
+                raise ValueError("prompts cannot be empty or whitespace-only")
+
+        result = self.tokenizer.encode(text=text, return_tensors="pt", return_attention_mask=True)
+        if isinstance(result, tuple) and len(result) == 2:
+            input_ids, attention_mask = result
+            if isinstance(input_ids, Tensor) and isinstance(attention_mask, Tensor):
+                return input_ids, attention_mask
+
+        # 回退适配：若非标准 tokenizer 未返回 mask，则逐条 encode 并对齐左填充
+        encoded_list = [self.tokenizer.encode(t, return_tensors="pt") for t in text]
+        max_len = max(t.size(-1) for t in encoded_list)
+        pad_id = getattr(self.tokenizer, "pad_token_id", None) or getattr(self.tokenizer, "eos_token_id", 0)
+        batch_ids = []
+        batch_masks = []
+        for t in encoded_list:
+            pad_len = max_len - t.size(-1)
+            pads = torch.full((1, pad_len), pad_id, dtype=torch.long)
+            batch_ids.append(torch.cat([pads, t], dim=-1))
+            mask = torch.cat(
+                [torch.zeros((1, pad_len), dtype=torch.long), torch.ones_like(t, dtype=torch.long)],
+                dim=-1,
             )
+            batch_masks.append(mask)
+        return torch.cat(batch_ids, dim=0), torch.cat(batch_masks, dim=0)
 
-        return input_ids
-
-    def decode(self, token_ids: Tensor) -> str:
-        """将模型生成的 token IDs 解码为文本。
+    def decode(self, token_ids: Tensor) -> str | list[str]:
+        """将模型生成的 token IDs 解码为单条文本或文本列表。
 
         异常：
-            TypeError: token_ids 类型不正确，或 tokenizer 返回的结果不是字符串。
-            ValueError: token_ids 的形状不符合单条解码要求。
+            TypeError: token_ids 类型不正确。
+            ValueError: token_ids 的形状不合法。
         """
-
         if not isinstance(token_ids, Tensor):
             raise TypeError("token_ids must be a torch.Tensor")
-        if (
-            token_ids.ndim != 2
-            or token_ids.shape[0] != 1
-            or token_ids.shape[1] == 0
-        ):
+        if token_ids.ndim != 2 or token_ids.shape[1] == 0 or token_ids.shape[0] == 0:
             raise ValueError(
-                "token_ids must have a non-empty shape [1, sequence_length]"
+                "token_ids must have a non-empty shape [batch_size, sequence_length]"
             )
 
-        text = self.tokenizer.decode(token_ids=token_ids)
-        if not isinstance(text, str):
-            raise TypeError("tokenizer.decode() must return a string for single-sequence input")
-
-        return text
+        return self.tokenizer.decode(token_ids=token_ids, skip_special_tokens=True)
 
     def generate(
         self,
-        prompt: str,
+        prompt: str | list[str],
         *,
         max_new_tokens: int = 50,
-    ) -> dict[str, object]:
-        """根据单条输入文本生成文本。
+    ) -> dict[str, object] | list[dict[str, object]]:
+        """根据单条或批量输入文本自回归生成文本。
 
         异常：
-            TypeError: prompt 不是字符串。
+            TypeError: prompt 不是字符串或字符串列表。
             ValueError: prompt 为空、只包含空白字符，或 max_new_tokens 不是正数。
         """
-        if not isinstance(prompt, str):
-            raise TypeError("prompt must be a string")
-        if not prompt.strip():
-            raise ValueError("prompt cannot be empty or whitespace-only")
+        if not isinstance(prompt, (str, list)):
+            raise TypeError("prompt must be a string or a list of strings")
+
         if (
             not isinstance(max_new_tokens, int)
             or isinstance(max_new_tokens, bool)
@@ -126,21 +151,59 @@ class InferenceEngine:
         ):
             raise ValueError("max_new_tokens must be a positive integer")
 
-        input_ids = self.encode(prompt)
-        predicted_token_ids, token_count, stop_reason = generate_tokens(
+        if isinstance(prompt, str):
+            if not prompt.strip():
+                raise ValueError("prompt cannot be empty or whitespace-only")
+
+            input_ids = self.encode(prompt)
+            predicted_token_ids, token_count, stop_reason = generate_tokens(
+                model=self.model,
+                input_ids=input_ids,
+                device=self.device,
+                max_new_tokens=max_new_tokens,
+                eos_token_id=self.eos_token_id,
+                sampling_method=self.sampling_method,
+            )
+            decoded_text = self.decode(predicted_token_ids)
+            return {
+                "prompt": prompt,
+                "generated_text": decoded_text,
+                "sampling_method": self.sampling_method,
+                "token_count": token_count,
+                "stop_reason": stop_reason,
+            }
+
+        # -----------------------------------------------------------------
+        # 批量请求处理分支 (Batch Generation with Left-Padding)
+        # -----------------------------------------------------------------
+        input_ids, padding_mask = self.encode(prompt)
+        pad_id = getattr(self.tokenizer, "pad_token_id", None)
+        predicted_token_ids, token_counts, stop_reasons = generate_tokens(
             model=self.model,
             input_ids=input_ids,
             device=self.device,
             max_new_tokens=max_new_tokens,
             eos_token_id=self.eos_token_id,
+            pad_token_id=pad_id,
+            padding_mask=padding_mask,
             sampling_method=self.sampling_method,
         )
-        decoded_text = self.decode(predicted_token_ids)
-        return {
-            "prompt": prompt,
-            "generated_text": decoded_text,
-            "sampling_method": self.sampling_method,
-            "token_count": token_count,
-            "stop_reason": stop_reason,
-        }
+
+        decoded_texts = self.decode(predicted_token_ids)
+        if isinstance(decoded_texts, str):
+            decoded_texts = [decoded_texts]
+
+        results: list[dict[str, object]] = []
+        for i, p in enumerate(prompt):
+            results.append(
+                {
+                    "prompt": p,
+                    "generated_text": decoded_texts[i],
+                    "sampling_method": self.sampling_method,
+                    "token_count": token_counts[i] if isinstance(token_counts, list) else token_counts,
+                    "stop_reason": stop_reasons[i] if isinstance(stop_reasons, list) else stop_reasons,
+                }
+            )
+
+        return results
 

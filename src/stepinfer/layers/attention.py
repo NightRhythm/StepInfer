@@ -67,13 +67,15 @@ class CausalAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """执行因果点积自注意力计算。
 
         参数:
             q (torch.Tensor): 形状为 [batch_size, seq_len, num_heads, head_dim]
-            k (torch.Tensor): 形状为 [batch_size, seq_len, num_kv_heads, head_dim]
-            v (torch.Tensor): 形状为 [batch_size, seq_len, num_kv_heads, head_dim]
+            k (torch.Tensor): 形状为 [batch_size, k_seq_len, num_kv_heads, head_dim]
+            v (torch.Tensor): 形状为 [batch_size, k_seq_len, num_kv_heads, head_dim]
+            padding_mask (torch.Tensor | None): 填充掩码 [batch_size, k_seq_len]，1 表示有效，0 表示 PAD
 
         返回:
             torch.Tensor: 形状为 [batch_size, seq_len, num_heads, head_dim]
@@ -130,6 +132,18 @@ class CausalAttention(nn.Module):
                 diagonal=1 + (k_seq_len - seq_len),
             )
             scores = scores.masked_fill(causal_mask, torch.finfo(scores.dtype).min)
+
+        # 注入 Padding 掩码遮蔽 (0 为 PAD，1 为真实 Token)
+        if padding_mask is not None:
+            if padding_mask.ndim == 2:
+                pad_mask = padding_mask[:, :k_seq_len].unsqueeze(1).unsqueeze(2)
+            elif padding_mask.ndim == 4:
+                pad_mask = padding_mask[:, :, :, :k_seq_len]
+            else:
+                raise ValueError(
+                    f"padding_mask must be 2D [batch, k_seq_len] or 4D, got {padding_mask.ndim}D."
+                )
+            scores = scores.masked_fill(pad_mask == 0, torch.finfo(scores.dtype).min)
 
 
         # 4. 权重归一化与加权求和

@@ -47,7 +47,13 @@ def test_special_token_ids_are_exposed(tokenizer):
     assert tokenizer.pad_token_id is None or isinstance(tokenizer.pad_token_id, int)
 
 
-def test_batch_text_is_not_supported_yet(tokenizer):
-    with pytest.raises(TypeError, match="single string only"):
-        tokenizer.encode(["first", "second"])
+def test_batch_text_encoding_and_decoding(tokenizer):
+    prompts = ["first", "second sentence"]
+    input_ids, attention_mask = tokenizer.encode(prompts)
+    assert isinstance(input_ids, torch.Tensor)
+    assert isinstance(attention_mask, torch.Tensor)
+    assert input_ids.shape[0] == 2
+    assert attention_mask.shape[0] == 2
+    decoded = tokenizer.decode(input_ids, skip_special_tokens=True)
+    assert decoded == prompts
 

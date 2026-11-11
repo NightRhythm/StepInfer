@@ -106,6 +106,7 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         layer_cache: LayerKVCache | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """前向传播计算。
 
@@ -113,6 +114,7 @@ class Qwen3Attention(nn.Module):
             positions (torch.Tensor): 1D [seq_len] 或 2D [batch, seq_len] 的绝对位置索引
             hidden_states (torch.Tensor): 形状为 [batch_size, seq_len, hidden_size]
             layer_cache (LayerKVCache | None): 当前层的键值缓存管理实例
+            padding_mask (torch.Tensor | None): 填充掩码 [batch_size, k_seq_len]
 
         返回:
             torch.Tensor: 形状为 [batch_size, seq_len, hidden_size]
@@ -147,10 +149,9 @@ class Qwen3Attention(nn.Module):
             k, v = layer_cache.update(k, v)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
-            
 
-        # 6. 点积因果自注意力
-        attn_out = self.attn(q, k, v)
+        # 6. 点积自注意力
+        attn_out = self.attn(q, k, v, padding_mask=padding_mask)
 
         # 7. 展平并映射输出
         attn_out = attn_out.flatten(2, 3)
@@ -176,6 +177,7 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
         layer_cache: LayerKVCache | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """前向传播计算。
 
@@ -184,6 +186,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states (torch.Tensor): 输入隐藏状态 [batch, seq_len, hidden_size]
             residual (torch.Tensor | None): 上一层累加传递下来的残差张量
             layer_cache (LayerKVCache | None): 本层的键值缓存管理实例
+            padding_mask (torch.Tensor | None): 填充掩码 [batch_size, k_seq_len]
 
         返回:
             tuple[torch.Tensor, torch.Tensor]:
@@ -198,7 +201,12 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # 2. Self-Attention 前向
-        hidden_states = self.self_attn(positions, hidden_states, layer_cache=layer_cache)
+        hidden_states = self.self_attn(
+            positions,
+            hidden_states,
+            layer_cache=layer_cache,
+            padding_mask=padding_mask,
+        )
 
         # 3. Post-Attention RMSNorm (融合残差累加)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -206,7 +214,7 @@ class Qwen3DecoderLayer(nn.Module):
         # 4. MLP 前向
         hidden_states = self.mlp(hidden_states)
 
-        return hidden_states, residual # type: ignore
+        return hidden_states, residual  # type: ignore
 
 
 class Qwen3Model(nn.Module):
@@ -226,13 +234,15 @@ class Qwen3Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
         kv_cache: KVCache | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """模型主干前向传播。
 
         参数:
             input_ids (torch.Tensor): 输入 Token ID，形状 [batch_size, seq_len]
-            positions (torch.Tensor | None): 可选位置索引，为 None 时自动生成 [0, 1, ..., seq_len - 1]
+            positions (torch.Tensor | None): 可选位置索引，为 None 时根据 padding_mask 自动生成
             kv_cache (KVCache | None): 全层键值缓存管理容器
+            padding_mask (torch.Tensor | None): 填充掩码 [batch_size, seq_len]
 
         返回:
             torch.Tensor: 最终归一化后的隐藏状态，形状 [batch_size, seq_len, hidden_size]
@@ -244,9 +254,12 @@ class Qwen3Model(nn.Module):
 
         batch_size, seq_len = input_ids.shape
 
-        # 若未显式传入 positions，默认生成 1D 等差位置张量
+        # 若未显式传入 positions，默认根据 padding_mask 计算对齐位置，否则生成等差数列
         if positions is None:
-            positions = torch.arange(seq_len, device=input_ids.device)
+            if padding_mask is not None:
+                positions = (padding_mask.long().cumsum(dim=-1) - 1).clamp(min=0)
+            else:
+                positions = torch.arange(seq_len, device=input_ids.device)
 
         # 1. Token Embedding 查表
         hidden_states = self.embed_tokens(input_ids)
@@ -260,6 +273,7 @@ class Qwen3Model(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
                 layer_cache=layer_cache,
+                padding_mask=padding_mask,
             )
 
         # 3. 最终层归一化与残差融合
@@ -285,6 +299,7 @@ class Qwen3ForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor | None = None,
         kv_cache: KVCache | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """端到端因果语言模型前向计算。
 
@@ -292,10 +307,17 @@ class Qwen3ForCausalLM(nn.Module):
             input_ids (torch.Tensor): 输入 Token 序列，形状 [batch_size, seq_len]
             positions (torch.Tensor | None): 可选位置索引
             kv_cache (KVCache | None): 全层键值缓存容器
+            padding_mask (torch.Tensor | None): 填充掩码 [batch_size, seq_len]
 
         返回:
             torch.Tensor: 输出预测 Logits，形状 [batch_size, seq_len, vocab_size]
         """
-        hidden_states = self.model(input_ids, positions, kv_cache=kv_cache)
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            kv_cache=kv_cache,
+            padding_mask=padding_mask,
+        )
         logits = self.lm_head(hidden_states)
+        return logits
         return logits

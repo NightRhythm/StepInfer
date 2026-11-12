@@ -164,12 +164,19 @@ class BenchmarkTracker:
         else:
             self._cpu_step_times.append(time.perf_counter())
 
-    def finish(self, prompt_tokens: int) -> BenchmarkResult:
-        """同步设备、计算指标并结束当前测量运行。"""
+    def finish(self, prompt_tokens: int, batch_size: int = 1) -> BenchmarkResult:
+        """同步设备、计算指标并结束当前测量运行。
+
+        参数:
+            prompt_tokens (int): 序列的 Prompt Token 数量。
+            batch_size (int): 批处理大小 (默认为 1)。
+        """
         if not self._started:
             raise RuntimeError("Cannot finish: BenchmarkTracker has not been started.")
         if not isinstance(prompt_tokens, int) or isinstance(prompt_tokens, bool) or prompt_tokens <= 0:
             raise ValueError("prompt_tokens must be a positive integer.")
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer.")
 
         try:
             if self.use_cuda:
@@ -209,7 +216,7 @@ class BenchmarkTracker:
 
             snapshot = self.gpu_monitor.snapshot()
             wall_time = max(0.0, self._wall_end - self._wall_start)
-            generated_tokens = len(intervals)
+            generated_tokens = len(intervals) * batch_size
             throughput = generated_tokens / wall_time if wall_time > 0 else 0.0
 
             mfu_percent: float | None = None

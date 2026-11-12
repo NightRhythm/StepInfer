@@ -42,7 +42,7 @@ def _run_generation(
     use_cache: bool = True,
 ) -> torch.Tensor:
     input_ids = prompt_ids
-    prompt_len = prompt_ids.shape[-1]
+    batch_size, prompt_len = prompt_ids.shape
     device = prompt_ids.device
 
     kv_cache = None
@@ -50,7 +50,7 @@ def _run_generation(
         model_dtype = next(model.parameters()).dtype
         kv_cache = KVCache.from_config(
             config=model.config,
-            max_batch_size=1,
+            max_batch_size=batch_size,
             max_seq_len=prompt_len + max_new_tokens,
             dtype=model_dtype,
             device=device,
@@ -66,8 +66,8 @@ def _run_generation(
 
             # 2. Decode 阶段
             for _ in range(max_new_tokens - 1):
-                curr_pos = torch.tensor([kv_cache[0].current_length], device=device)
-                logits = model(next_token.view(1, 1), positions=curr_pos, kv_cache=kv_cache)
+                curr_pos = torch.full((batch_size, 1), kv_cache[0].current_length, device=device)
+                logits = model(next_token.unsqueeze(-1), positions=curr_pos, kv_cache=kv_cache)
                 next_token = sample_next_token(logits[:, -1, :], method="greedy")
                 input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
         else:
@@ -85,6 +85,7 @@ def _make_prompt_ids(
     length: int,
     vocab_size: int,
     *,
+    batch_size: int = 1,
     seed: int,
     device: torch.device,
 ) -> torch.Tensor:
@@ -92,7 +93,7 @@ def _make_prompt_ids(
     return torch.randint(
         low=100,
         high=vocab_size - 100,
-        size=(1, length),
+        size=(batch_size, length),
         generator=generator,
         device="cpu",
         dtype=torch.long,
@@ -129,6 +130,7 @@ def _render_profiler_report(
     prompt_length: int,
     max_new_tokens: int,
     profiler: TorchProfiler,
+    batch_size: int = 1,
     trace_rel_path: str | None = None,
     top_n: int = 15,
     use_cache: bool = True,
@@ -153,6 +155,7 @@ def _render_profiler_report(
         f"| PyTorch | {torch.__version__} |",
         f"| Python | {platform.python_version()} |",
         f"| KV Cache | {cache_str} |",
+        f"| Batch Size | {batch_size} |",
         f"| Prompt Tokens | {prompt_length} |",
         f"| Generated Tokens | {max_new_tokens} |",
         f"| Chrome Trace | {trace_display} |",
@@ -221,6 +224,7 @@ def _render_profiler_report(
 def run_profiler_benchmark(
     model_path: Path,
     device: str = "cuda:0",
+    batch_size: int = 1,
     prompt_length: int = 512,
     max_new_tokens: int = 1,
     warmup_runs: int = 2,
@@ -230,6 +234,8 @@ def run_profiler_benchmark(
     use_cache: bool = True,
     save_trace: bool = True,
 ) -> tuple[Path | None, Path]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
     if prompt_length <= 0:
         raise ValueError("prompt_length must be positive")
     if max_new_tokens <= 0:
@@ -258,11 +264,19 @@ def run_profiler_benchmark(
     tokenizer = HFTokenizer(ModelConfig(name=model_path.name, model_dir=model_path))
 
     num_params = sum(p.numel() for p in model.parameters())
-    logger.info("Model ready: %d parameters, device=%s, dtype=%s, use_cache=%s", num_params, target_device, dtype, use_cache)
+    logger.info(
+        "Model ready: %d parameters, device=%s, dtype=%s, batch_size=%d, use_cache=%s",
+        num_params,
+        target_device,
+        dtype,
+        batch_size,
+        use_cache,
+    )
 
     prompt_ids = _make_prompt_ids(
         length=prompt_length,
         vocab_size=config.vocab_size,
+        batch_size=batch_size,
         seed=seed,
         device=target_device,
     )
@@ -274,8 +288,9 @@ def run_profiler_benchmark(
         del out
 
     logger.info(
-        "Starting Profiler for %s (prompt_length=%d, max_new_tokens=%d, use_cache=%s)...",
+        "Starting Profiler for %s (batch_size=%d, prompt_length=%d, max_new_tokens=%d, use_cache=%s)...",
         model_path.name,
+        batch_size,
         prompt_length,
         max_new_tokens,
         use_cache,
@@ -291,7 +306,13 @@ def run_profiler_benchmark(
     md_dir = resolved_raw_dir / "md"
     md_dir.mkdir(parents=True, exist_ok=True)
 
-    md_prefix = "kvcache" if use_cache else "baseline"
+    if batch_size > 1:
+        md_prefix = "batch"
+    elif use_cache:
+        md_prefix = "kvcache"
+    else:
+        md_prefix = "baseline"
+
     md_name = f"{md_prefix}_profiler_{model_tag}.md" if not model_tag.startswith(md_prefix) else f"profiler_{model_tag}.md"
     md_path = md_dir / md_name
 
@@ -317,6 +338,7 @@ def run_profiler_benchmark(
         prompt_length=prompt_length,
         max_new_tokens=max_new_tokens,
         profiler=profiler,
+        batch_size=batch_size,
         trace_rel_path=trace_rel_for_md,
         top_n=15,
         use_cache=use_cache,
@@ -328,7 +350,7 @@ def run_profiler_benchmark(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="StepInfer single-request profiler benchmark")
+    parser = argparse.ArgumentParser(description="StepInfer single/batch request profiler benchmark")
     parser.add_argument(
         "--model-path",
         type=Path,
@@ -340,6 +362,12 @@ def main() -> None:
         type=str,
         default="cuda:0" if torch.cuda.is_available() else "cpu",
         help="Device to run on (e.g. cuda:0, cpu)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Batch size to profile",
     )
     parser.add_argument(
         "--prompt-length",
@@ -382,6 +410,7 @@ def main() -> None:
     run_profiler_benchmark(
         model_path=args.model_path,
         device=args.device,
+        batch_size=args.batch_size,
         prompt_length=args.prompt_length,
         max_new_tokens=args.max_new_tokens,
         warmup_runs=args.warmup_runs,

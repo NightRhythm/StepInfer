@@ -96,3 +96,9 @@
 - ✅ 重构 `src/stepinfer/inference/generator.py`（放开 `batch_size == 1` 限制，设计精细的 `prev_finished` 状态机以保留触发 EOS 的有效 Token，并在后续陪跑步骤将输出冻结为 `pad_token_id`）
 - ✅ 改造 `src/stepinfer/inference/inference_engine.py`（统一对外 `generate` 接口支持单条与批量输入，批量模式下按序列独立解码并过滤 Special Token）
 - ✅ 编写 `tests/test_batch_inference.py`（全仓库 115 项单元测试 100% 绿灯，严格验证左填充结构、防 NaN、多序列独立停止以及单条 vs 批处理一致性金标准测试）
+
+### Day 12 
+
+- ✅ 实现 `benchmarks/batch_benchmark.py`（批处理基准测试工具，支持多 Batch Size `[1, 2, 4, 8]` 与多 Prompt 长度横向评测，自动计算 Speedup、吞吐率 tok/s 与 MFU，产出纯净 Markdown 工件）
+- ✅ 升级 `benchmarks/profiler_benchmark.py`（支持 `--batch-size` 参数与批处理工件生成，并清除历史冗余死代码）
+- ✅ 完成真实 GPU (RTX 5060 Ti) 批处理基准评测

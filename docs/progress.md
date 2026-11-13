@@ -102,3 +102,11 @@
 - ✅ 实现 `benchmarks/batch_benchmark.py`（批处理基准测试工具，支持多 Batch Size `[1, 2, 4, 8]` 与多 Prompt 长度横向评测，自动计算 Speedup、吞吐率 tok/s 与 MFU，产出纯净 Markdown 工件）
 - ✅ 升级 `benchmarks/profiler_benchmark.py`（支持 `--batch-size` 参数与批处理工件生成，并清除历史冗余死代码）
 - ✅ 完成真实 GPU (RTX 5060 Ti) 批处理基准评测
+
+### Day 13
+
+- ✅ 沉淀请求与调度中枢核心问答与推导工件 `docs/Q&A/request+scheduler.md`（按时间顺序归纳梳理 Iteration-level 调度本质、Attention/KV Cache 两阶段数据流契约、缩 Batch 策略、Prefill/Decode 维度冲突与防雪崩背压机制）
+- ✅ 实现 `src/stepinfer/scheduler/request.py`（定义 `RequestStatus` 三态枚举与 `Request` 抽象，封装 Prompt/生成 Token 序列、时间戳、`is_prefill` 阶段识别属性，以及自收敛生成上限与显式完成判定）
+- ✅ 实现 `src/stepinfer/scheduler/request_queue.py`（实现 `QueueFullError` 背压防护异常与 `RequestQueue` 等待队列，基于 `collections.deque` 保证严格 FIFO 顺序、批量获取配额与主动取消）
+- ✅ 实现 `src/stepinfer/scheduler/scheduler.py`（设计 `ScheduleResult` 决策载体与 `Scheduler` 调度控制中心，实现 `max_batch_size` 槽位配额管控、`max_seq_len` 上下文拦截、Prefill/Decode 分阶段解耦调度，以及 `post_step` Token 写回与完成态即刻移出的零泄漏槽位回收机制）
+- ✅ 实现 `src/stepinfer/scheduler/__init__.py`（统一导出请求生命周期与调度模块的核心接口与异常定义）

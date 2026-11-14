@@ -82,10 +82,10 @@ class Scheduler:
         异常:
             ValueError: max_batch_size 或 max_seq_len 非正整数。
         """
-        if not isinstance(max_batch_size, int) or isinstance(max_batch_size, bool) or max_batch_size <= 0:
+        if max_batch_size <= 0:
             raise ValueError(f"max_batch_size must be a positive integer, got {max_batch_size}.")
 
-        if not isinstance(max_seq_len, int) or isinstance(max_seq_len, bool) or max_seq_len <= 0:
+        if max_seq_len <= 0:
             raise ValueError(f"max_seq_len must be a positive integer, got {max_seq_len}.")
 
         self.max_batch_size = max_batch_size

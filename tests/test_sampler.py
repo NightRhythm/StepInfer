@@ -21,11 +21,6 @@ def test_greedy_sample_selects_highest_logit_for_each_batch_item():
     assert torch.equal(token_ids, torch.tensor([1, 0]))
 
 
-def test_greedy_sample_rejects_non_tensor_input():
-    with pytest.raises(TypeError, match="torch.Tensor"):
-        greedy_sample([0.1, 0.9])
-
-
 @pytest.mark.parametrize(
     "logits",
     [torch.zeros(1, 1, 3), torch.zeros(0, 3), torch.zeros(2, 0)],

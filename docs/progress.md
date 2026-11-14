@@ -110,3 +110,10 @@
 - ✅ 实现 `src/stepinfer/scheduler/request_queue.py`（实现 `QueueFullError` 背压防护异常与 `RequestQueue` 等待队列，基于 `collections.deque` 保证严格 FIFO 顺序、批量获取配额与主动取消）
 - ✅ 实现 `src/stepinfer/scheduler/scheduler.py`（设计 `ScheduleResult` 决策载体与 `Scheduler` 调度控制中心，实现 `max_batch_size` 槽位配额管控、`max_seq_len` 上下文拦截、Prefill/Decode 分阶段解耦调度，以及 `post_step` Token 写回与完成态即刻移出的零泄漏槽位回收机制）
 - ✅ 实现 `src/stepinfer/scheduler/__init__.py`（统一导出请求生命周期与调度模块的核心接口与异常定义）
+
+### Day 14
+
+- ✅ 编写 `docs/architecture.md`（端到端架构数据流图）
+- ✅ 重构 `src/stepinfer/cache/kv_cache.py`（升级为支持连续批处理的物理插槽隔离槽位式 KV Cache）
+- ✅ 重构并精简调度模块核心抽象
+- ✅ 系统性裁剪与重构测试套件（测试用例总数从 115 个瘦身至 82 个，单测回归更加聚焦、极速且干净）

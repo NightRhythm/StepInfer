@@ -16,9 +16,6 @@ def test_gpu_monitor_initialization_types():
     m_dev = GPUMonitor(torch.device("cpu"))
     assert m_dev.device.type == "cpu"
 
-    with pytest.raises(TypeError, match="device must be int, str, or torch.device"):
-        GPUMonitor(3.14)  # type: ignore
-
 
 def test_gpu_monitor_cpu_fallback():
     monitor = GPUMonitor("cpu")

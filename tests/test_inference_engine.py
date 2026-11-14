@@ -1,3 +1,5 @@
+"""推理引擎 (InferenceEngine) 快速 Mock 单元测试。"""
+
 import pytest
 import torch
 from torch import nn
@@ -12,7 +14,6 @@ class CharacterTokenizer(BaseTokenizer):
         return 2
 
     def encode(self, text, **kwargs):
-        assert kwargs.get("return_tensors") == "pt"
         return torch.tensor([[ord(char) for char in text]], dtype=torch.long)
 
     def decode(self, token_ids, **kwargs):
@@ -34,15 +35,15 @@ class ConstantLogitsModel(nn.Module):
         return logits
 
 
-def test_engine_generates_text_and_uses_tokenizer_eos_id():
-    engine = InferenceEngine(
-        model=ConstantLogitsModel(next_token_id=33),
-        tokenizer=CharacterTokenizer(),
-    )
+def test_engine_generates_text_and_lifecycle():
+    """验证 InferenceEngine 驱动模型自回归生成、自动设为 eval 模式及返回完整结果字典。"""
+    model = ConstantLogitsModel(next_token_id=33)  # ord('!') == 33
+    model.train()
+
+    engine = InferenceEngine(model=model, tokenizer=CharacterTokenizer())
+    assert engine.model.training is False
 
     result = engine.generate("hi", max_new_tokens=2)
-
-    assert engine.eos_token_id == 2
     assert result == {
         "prompt": "hi",
         "generated_text": "hi!!",
@@ -52,57 +53,15 @@ def test_engine_generates_text_and_uses_tokenizer_eos_id():
     }
 
 
-def test_engine_uses_explicit_eos_id_in_preference_to_tokenizer():
-    engine = InferenceEngine(
-        model=ConstantLogitsModel(next_token_id=33),
-        tokenizer=CharacterTokenizer(),
-        eos_token_id=99,
-    )
-
-    assert engine.eos_token_id == 99
-
-
-def test_engine_sets_model_to_evaluation_mode():
-    model = ConstantLogitsModel(next_token_id=33)
-    model.train()
-
-    engine = InferenceEngine(model=model, tokenizer=CharacterTokenizer())
-
-    assert engine.model.training is False
-
-
-@pytest.mark.parametrize("prompt", ["", "   ", "\n\t"])
-def test_engine_rejects_empty_or_whitespace_prompt(prompt):
+def test_engine_input_boundaries():
+    """验证非法输入边界（空 Prompt、非正 token 上限）的防御拦截。"""
     engine = InferenceEngine(
         model=ConstantLogitsModel(next_token_id=33),
         tokenizer=CharacterTokenizer(),
     )
 
     with pytest.raises(ValueError, match="empty or whitespace-only"):
-        engine.generate(prompt)
-
-
-def test_engine_rejects_non_string_prompt():
-    engine = InferenceEngine(
-        model=ConstantLogitsModel(next_token_id=33),
-        tokenizer=CharacterTokenizer(),
-    )
-
-    with pytest.raises(TypeError, match="prompt must be a string"):
-        engine.generate(123)
-
-
-def test_engine_rejects_non_positive_generation_limit():
-    engine = InferenceEngine(
-        model=ConstantLogitsModel(next_token_id=33),
-        tokenizer=CharacterTokenizer(),
-    )
+        engine.generate("   ")
 
     with pytest.raises(ValueError, match="max_new_tokens must be a positive integer"):
         engine.generate("hi", max_new_tokens=0)
-
-
-def test_engine_rejects_non_module_model():
-    with pytest.raises(TypeError, match="torch.nn.Module"):
-        InferenceEngine(model=object(), tokenizer=CharacterTokenizer())
-

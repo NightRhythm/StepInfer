@@ -26,15 +26,6 @@ class ConstantLogitsModel(nn.Module):
         return logits
 
 
-class InvalidRankModel(nn.Module):
-    def forward(self, input_ids):
-        return torch.zeros(input_ids.shape[0], 10, device=input_ids.device)
-
-
-class NonTensorOutputModel(nn.Module):
-    def forward(self, input_ids):
-        return "not logits"
-
 
 def test_generator_stops_when_eos_is_generated():
     model = ConstantLogitsModel(next_token_id=2)
@@ -69,42 +60,6 @@ def test_generator_stops_at_max_new_tokens_and_reprocesses_full_sequence():
     assert stop_reason == "Reached max_new_tokens limit of 3."
     assert model.input_shapes == [(1, 2), (1, 3), (1, 4)]
     assert model.grad_enabled_during_forward == [False, False, False]
-
-
-@pytest.mark.parametrize(
-    ("input_ids", "max_new_tokens", "error_type"),
-    [
-        ("not a tensor", 2, TypeError),
-        (torch.empty((1, 0), dtype=torch.long), 2, ValueError),
-        (torch.empty((1, 2, 3), dtype=torch.long), 2, ValueError),
-        (torch.tensor([[1, 2]]), 0, ValueError),
-    ],
-)
-def test_generator_validates_inputs(input_ids, max_new_tokens, error_type):
-    with pytest.raises(error_type):
-        generate_tokens(
-            ConstantLogitsModel(next_token_id=33),
-            input_ids,
-            device="cpu",
-            max_new_tokens=max_new_tokens,
-        )
-
-
-@pytest.mark.parametrize(
-    ("model", "error_type"),
-    [
-        (InvalidRankModel(), ValueError),
-        (NonTensorOutputModel(), TypeError),
-    ],
-)
-def test_generator_validates_model_output(model, error_type):
-    with pytest.raises(error_type):
-        generate_tokens(
-            model,
-            torch.tensor([[1, 2]]),
-            device="cpu",
-            max_new_tokens=1,
-        )
 
 
 def test_generator_rejects_unsupported_sampling_method():

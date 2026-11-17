@@ -1,14 +1,21 @@
-"""协调 tokenizer、模型和生成循环的基础推理入口。"""
+"""推理引擎入口模块 (InferenceEngine)。
 
+协调 Tokenizer、模型与调度中枢，支持单请求与连续批处理 (Continuous Batching) 流水线自回归生成。
+"""
+
+import uuid
 import torch
 from torch import Tensor, nn
 
-from stepinfer.inference.generator import generate_tokens
+from stepinfer.cache.kv_cache import KVCache
+from stepinfer.inference.sampler import sample_next_token
+from stepinfer.scheduler.request import Request
+from stepinfer.scheduler.scheduler import Scheduler
 from stepinfer.tokenizer.base import BaseTokenizer
 
 
 class InferenceEngine:
-    """提供从输入文本到生成文本的完整调用入口。"""
+    """提供从输入文本到生成文本的完整调用入口，内置连续批处理调度流水线。"""
 
     def __init__(
         self,
@@ -18,28 +25,17 @@ class InferenceEngine:
         device: str | torch.device = "cpu",
         eos_token_id: int | None = None,
         sampling_method: str = "greedy",
+        max_batch_size: int = 8,
+        max_seq_len: int = 2048,
     ) -> None:
-        """保存推理所需组件，并完成基础校验。
-
-        异常：
-            TypeError: model 不是 ``torch.nn.Module``，或 tokenizer 缺少
-                可调用的 encode() / decode() 方法。
-        """
+        """初始化推理引擎，完成组件挂载与调度器就绪。"""
         if not isinstance(model, nn.Module):
             raise TypeError("model must be an instance of torch.nn.Module")
         if tokenizer is None:
             raise TypeError("tokenizer cannot be None")
-        
-        encode_fn = getattr(tokenizer, "encode", None)
-        decode_fn = getattr(tokenizer, "decode", None)
-        
-        if not callable(encode_fn):
-            raise TypeError("Tokenizer must provide a callable 'encode' method.")
-        
-        if not callable(decode_fn):
-            raise TypeError("Tokenizer must provide a callable 'decode' method.")
 
-        self.model = model
+        self.model = model.to(device)
+        self.model.eval()
         self.tokenizer = tokenizer
         self.device = torch.device(device)
         self.eos_token_id = (
@@ -48,86 +44,163 @@ class InferenceEngine:
             else getattr(self.tokenizer, "eos_token_id", None)
         )
         self.sampling_method = sampling_method
+        self.max_batch_size = max_batch_size
+        self.max_seq_len = max_seq_len
 
-        self.model = self.model.to(self.device)
-        self.model.eval()
+        # 调度中枢
+        self.scheduler = Scheduler(max_batch_size=self.max_batch_size, max_seq_len=self.max_seq_len)
 
-    def encode(self, text: str | list[str]) -> Tensor | tuple[Tensor, Tensor]:
-        """将单条或批量输入文本编码为模型输入的 token IDs (单条) 或 (token IDs, padding mask) (批量)。
+        # 显存预分配: 若模型配置就绪，预分配全局槽位隔离 KV Cache
+        self.kv_cache: KVCache | None = None
+        if hasattr(self.model, "config"):
+            model_dtype = getattr(self.model, "dtype", None)
+            if model_dtype is None and hasattr(self.model, "parameters"):
+                try:
+                    model_dtype = next(self.model.parameters()).dtype
+                except StopIteration:
+                    model_dtype = torch.float32
+            else:
+                model_dtype = torch.float32
 
-        异常：
-            TypeError: text 类型不正确，或 tokenizer 返回的结果类型不匹配。
-            ValueError: 文本为空、包含空白字符，或编码结果形状不合法。
-        """
-        if not isinstance(text, (str, list)):
-            raise TypeError("text must be a string or a list of strings")
+            self.kv_cache = KVCache.from_config(
+                config=self.model.config,
+                max_batch_size=self.max_batch_size,
+                max_seq_len=self.max_seq_len,
+                dtype=model_dtype,
+                device=self.device,
+            )
 
+    def encode(self, text: str | list[str]) -> Tensor:
+        """将输入文本编码为模型输入的 token IDs。"""
         if isinstance(text, str):
             if not text.strip():
                 raise ValueError("text cannot be empty or whitespace-only")
+            token_ids = self.tokenizer.encode(text=text, return_tensors="pt")
+            if not isinstance(token_ids, Tensor):
+                token_ids = torch.tensor(token_ids, dtype=torch.long)
+            if token_ids.ndim == 1:
+                token_ids = token_ids.unsqueeze(0)
+            return token_ids.to(self.device)
 
-            input_ids = self.tokenizer.encode(text=text, return_tensors="pt")
-            if not isinstance(input_ids, Tensor):
-                raise TypeError("tokenizer.encode() must return a torch.Tensor")
-            if (
-                input_ids.ndim != 2
-                or input_ids.shape[0] != 1
-                or input_ids.shape[1] == 0
-            ):
-                raise ValueError(
-                    "tokenizer.encode() must return a non-empty tensor with shape "
-                    "[1, sequence_length]"
-                )
-
-            return input_ids
-
-        # 批量文本处理
         if not text:
             raise ValueError("texts cannot be empty")
         for t in text:
-            if not isinstance(t, str):
-                raise TypeError("All items in texts must be strings")
-            if not t.strip():
+            if not isinstance(t, str) or not t.strip():
                 raise ValueError("prompts cannot be empty or whitespace-only")
 
-        result = self.tokenizer.encode(text=text, return_tensors="pt", return_attention_mask=True)
-        if isinstance(result, tuple) and len(result) == 2:
-            input_ids, attention_mask = result
-            if isinstance(input_ids, Tensor) and isinstance(attention_mask, Tensor):
-                return input_ids, attention_mask
-
-        # 回退适配：若非标准 tokenizer 未返回 mask，则逐条 encode 并对齐左填充
-        encoded_list = [self.tokenizer.encode(t, return_tensors="pt") for t in text]
-        max_len = max(t.size(-1) for t in encoded_list)
-        pad_id = getattr(self.tokenizer, "pad_token_id", None) or getattr(self.tokenizer, "eos_token_id", 0)
-        batch_ids = []
-        batch_masks = []
-        for t in encoded_list:
-            pad_len = max_len - t.size(-1)
-            pads = torch.full((1, pad_len), pad_id, dtype=torch.long)
-            batch_ids.append(torch.cat([pads, t], dim=-1))
-            mask = torch.cat(
-                [torch.zeros((1, pad_len), dtype=torch.long), torch.ones_like(t, dtype=torch.long)],
-                dim=-1,
-            )
-            batch_masks.append(mask)
-        return torch.cat(batch_ids, dim=0), torch.cat(batch_masks, dim=0)
+        token_ids, _ = self.tokenizer.encode(text=text, return_tensors="pt")
+        return token_ids.to(self.device)
 
     def decode(self, token_ids: Tensor) -> str | list[str]:
-        """将模型生成的 token IDs 解码为单条文本或文本列表。
-
-        异常：
-            TypeError: token_ids 类型不正确。
-            ValueError: token_ids 的形状不合法。
-        """
+        """将 token IDs 解码为文本。"""
         if not isinstance(token_ids, Tensor):
-            raise TypeError("token_ids must be a torch.Tensor")
-        if token_ids.ndim != 2 or token_ids.shape[1] == 0 or token_ids.shape[0] == 0:
-            raise ValueError(
-                "token_ids must have a non-empty shape [batch_size, sequence_length]"
-            )
-
+            token_ids = torch.tensor(token_ids, dtype=torch.long)
+        if token_ids.ndim == 1:
+            token_ids = token_ids.unsqueeze(0)
         return self.tokenizer.decode(token_ids=token_ids, skip_special_tokens=True)
+
+    def add_request(self, prompt: str, max_new_tokens: int = 50) -> Request:
+        """向调度队列提交一条新请求。"""
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt cannot be empty or whitespace-only.")
+        if max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be a positive integer.")
+
+        # 编码 Prompt
+        encoded = self.tokenizer.encode(prompt, return_tensors=None)
+        if isinstance(encoded, Tensor):
+            prompt_tokens = encoded.flatten().tolist()
+        else:
+            prompt_tokens = list(encoded)
+
+        req_id = f"req-{uuid.uuid4().hex[:8]}"
+        req = Request(
+            request_id=req_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_tokens,
+            max_new_tokens=max_new_tokens,
+        )
+        self.scheduler.add_request(req)
+        return req
+
+    def step(self) -> list[Request]:
+        """执行单步连续批调度与前向计算。
+
+        返回:
+            list[Request]: 本步刚触发完成的请求列表。
+        """
+        sched_res = self.scheduler.schedule()
+        if sched_res.is_empty:
+            return []
+
+        requests = sched_res.requests
+
+        with torch.inference_mode():
+            if sched_res.is_prefill:
+                # -------------------------------------------------------------
+                # Prefill 阶段: 各新请求首步独立前向，写入各自的物理 slot
+                # -------------------------------------------------------------
+                next_tokens_list: list[int] = []
+                for req in requests:
+                    in_ids = torch.tensor([req.prompt_token_ids], dtype=torch.long, device=self.device)
+                    positions = torch.arange(len(req.prompt_token_ids), dtype=torch.long, device=self.device)
+
+                    if self.kv_cache is not None:
+                        logits = self.model(
+                            in_ids,
+                            positions=positions,
+                            kv_cache=self.kv_cache,
+                            slot_ids=[req.slot_id],
+                        )
+                    else:
+                        logits = self.model(in_ids)
+
+                    next_token = sample_next_token(logits[:, -1, :], method=self.sampling_method).item()
+                    next_tokens_list.append(int(next_token))
+
+                finished = self.scheduler.post_step(
+                    requests=requests,
+                    next_tokens=next_tokens_list,
+                    eos_token_id=self.eos_token_id,
+                )
+                if self.kv_cache is not None:
+                    for req in finished:
+                        if req.slot_id is not None:
+                            self.kv_cache.reset_slot(req.slot_id)
+                return finished
+
+            else:
+                # -------------------------------------------------------------
+                # Decode 阶段: 并发批处理各活跃序列的单步 Token 解码 (BMM 加速)
+                # -------------------------------------------------------------
+                curr_tokens = [req.generated_token_ids[-1] for req in requests]
+                in_ids = torch.tensor(curr_tokens, dtype=torch.long, device=self.device).unsqueeze(-1)
+                positions = torch.tensor([[req.total_len - 1] for req in requests], dtype=torch.long, device=self.device)
+                slot_ids = [req.slot_id for req in requests]
+
+                if self.kv_cache is not None:
+                    logits = self.model(
+                        in_ids,
+                        positions=positions,
+                        kv_cache=self.kv_cache,
+                        slot_ids=slot_ids,
+                    )
+                else:
+                    logits = self.model(in_ids)
+
+                next_tokens = sample_next_token(logits[:, -1, :], method=self.sampling_method)
+                next_tokens_list = next_tokens.flatten().tolist()
+
+                finished = self.scheduler.post_step(
+                    requests=requests,
+                    next_tokens=next_tokens_list,
+                    eos_token_id=self.eos_token_id,
+                )
+                if self.kv_cache is not None:
+                    for req in finished:
+                        if req.slot_id is not None:
+                            self.kv_cache.reset_slot(req.slot_id)
+                return finished
 
     def generate(
         self,
@@ -135,15 +208,9 @@ class InferenceEngine:
         *,
         max_new_tokens: int = 50,
     ) -> dict[str, object] | list[dict[str, object]]:
-        """根据单条或批量输入文本自回归生成文本。
-
-        异常：
-            TypeError: prompt 不是字符串或字符串列表。
-            ValueError: prompt 为空、只包含空白字符，或 max_new_tokens 不是正数。
-        """
+        """根据单条或批量输入文本自回归生成文本。"""
         if not isinstance(prompt, (str, list)):
             raise TypeError("prompt must be a string or a list of strings")
-
         if (
             not isinstance(max_new_tokens, int)
             or isinstance(max_new_tokens, bool)
@@ -152,58 +219,46 @@ class InferenceEngine:
             raise ValueError("max_new_tokens must be a positive integer")
 
         if isinstance(prompt, str):
-            if not prompt.strip():
-                raise ValueError("prompt cannot be empty or whitespace-only")
+            prompts = [prompt]
+            single = True
+        else:
+            prompts = prompt
+            single = False
 
-            input_ids = self.encode(prompt)
-            predicted_token_ids, token_count, stop_reason = generate_tokens(
-                model=self.model,
-                input_ids=input_ids,
-                device=self.device,
-                max_new_tokens=max_new_tokens,
-                eos_token_id=self.eos_token_id,
-                sampling_method=self.sampling_method,
-            )
-            decoded_text = self.decode(predicted_token_ids)
-            return {
-                "prompt": prompt,
-                "generated_text": decoded_text,
-                "sampling_method": self.sampling_method,
-                "token_count": token_count,
-                "stop_reason": stop_reason,
-            }
+        if not prompts:
+            raise ValueError("prompt cannot be empty")
 
-        # -----------------------------------------------------------------
-        # 批量请求处理分支 (Batch Generation with Left-Padding)
-        # -----------------------------------------------------------------
-        input_ids, padding_mask = self.encode(prompt)
-        pad_id = getattr(self.tokenizer, "pad_token_id", None)
-        predicted_token_ids, token_counts, stop_reasons = generate_tokens(
-            model=self.model,
-            input_ids=input_ids,
-            device=self.device,
-            max_new_tokens=max_new_tokens,
-            eos_token_id=self.eos_token_id,
-            pad_token_id=pad_id,
-            padding_mask=padding_mask,
-            sampling_method=self.sampling_method,
-        )
+        # 1. 提交所有请求至调度等待队列
+        submitted_requests: list[Request] = []
+        for p in prompts:
+            req = self.add_request(p, max_new_tokens=max_new_tokens)
+            submitted_requests.append(req)
 
-        decoded_texts = self.decode(predicted_token_ids)
-        if isinstance(decoded_texts, str):
-            decoded_texts = [decoded_texts]
+        # 2. 连续批步进循环，直至所有提交的请求均触发完成
+        while any(not r.is_finished for r in submitted_requests):
+            self.step()
 
+        # 3. 组织结果返回
         results: list[dict[str, object]] = []
-        for i, p in enumerate(prompt):
+        for r in submitted_requests:
+            full_tokens = r.prompt_token_ids + r.generated_token_ids
+            decoded_text = self.decode(torch.tensor([full_tokens], dtype=torch.long))
+            if isinstance(decoded_text, list):
+                decoded_text = decoded_text[0]
+
+            stop_reason = (
+                "Generated EOS token."
+                if r.stop_reason == "stop"
+                else f"Reached max_new_tokens limit of {r.max_new_tokens}."
+            )
             results.append(
                 {
-                    "prompt": p,
-                    "generated_text": decoded_texts[i],
+                    "prompt": r.prompt,
+                    "generated_text": decoded_text,
                     "sampling_method": self.sampling_method,
-                    "token_count": token_counts[i] if isinstance(token_counts, list) else token_counts,
-                    "stop_reason": stop_reasons[i] if isinstance(stop_reasons, list) else stop_reasons,
+                    "token_count": r.num_generated_tokens,
+                    "stop_reason": stop_reason,
                 }
             )
 
-        return results
-
+        return results[0] if single else results

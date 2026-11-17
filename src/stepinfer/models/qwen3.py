@@ -107,6 +107,7 @@ class Qwen3Attention(nn.Module):
         hidden_states: torch.Tensor,
         layer_cache: LayerKVCache | None = None,
         padding_mask: torch.Tensor | None = None,
+        slot_ids: list[int] | None = None,
     ) -> torch.Tensor:
         """前向传播计算。
 
@@ -115,6 +116,7 @@ class Qwen3Attention(nn.Module):
             hidden_states (torch.Tensor): 形状为 [batch_size, seq_len, hidden_size]
             layer_cache (LayerKVCache | None): 当前层的键值缓存管理实例
             padding_mask (torch.Tensor | None): 填充掩码 [batch_size, k_seq_len]
+            slot_ids (list[int] | None): 对应各序列写入的物理插槽列表
 
         返回:
             torch.Tensor: 形状为 [batch_size, seq_len, hidden_size]
@@ -144,9 +146,10 @@ class Qwen3Attention(nn.Module):
 
         # 5. KV Cache 缓存存取更新 (若启用)
         if layer_cache is not None:
+            actual_slots = slot_ids if slot_ids is not None else list(range(batch_size))
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
-            k, v = layer_cache.update(k, v)
+            k, v = layer_cache.update(k, v, actual_slots)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
 
@@ -178,6 +181,7 @@ class Qwen3DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         layer_cache: LayerKVCache | None = None,
         padding_mask: torch.Tensor | None = None,
+        slot_ids: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """前向传播计算。
 
@@ -206,6 +210,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             layer_cache=layer_cache,
             padding_mask=padding_mask,
+            slot_ids=slot_ids,
         )
 
         # 3. Post-Attention RMSNorm (融合残差累加)
@@ -235,6 +240,7 @@ class Qwen3Model(nn.Module):
         positions: torch.Tensor | None = None,
         kv_cache: KVCache | None = None,
         padding_mask: torch.Tensor | None = None,
+        slot_ids: list[int] | None = None,
     ) -> torch.Tensor:
         """模型主干前向传播。
 
@@ -274,6 +280,7 @@ class Qwen3Model(nn.Module):
                 residual=residual,
                 layer_cache=layer_cache,
                 padding_mask=padding_mask,
+                slot_ids=slot_ids,
             )
 
         # 3. 最终层归一化与残差融合
@@ -300,6 +307,7 @@ class Qwen3ForCausalLM(nn.Module):
         positions: torch.Tensor | None = None,
         kv_cache: KVCache | None = None,
         padding_mask: torch.Tensor | None = None,
+        slot_ids: list[int] | None = None,
     ) -> torch.Tensor:
         """端到端因果语言模型前向计算。
 
@@ -308,6 +316,7 @@ class Qwen3ForCausalLM(nn.Module):
             positions (torch.Tensor | None): 可选位置索引
             kv_cache (KVCache | None): 全层键值缓存容器
             padding_mask (torch.Tensor | None): 填充掩码 [batch_size, seq_len]
+            slot_ids (list[int] | None): 对应各序列写入的物理插槽列表
 
         返回:
             torch.Tensor: 输出预测 Logits，形状 [batch_size, seq_len, vocab_size]
@@ -317,7 +326,7 @@ class Qwen3ForCausalLM(nn.Module):
             positions=positions,
             kv_cache=kv_cache,
             padding_mask=padding_mask,
+            slot_ids=slot_ids,
         )
         logits = self.lm_head(hidden_states)
-        return logits
         return logits

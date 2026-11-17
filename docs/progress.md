@@ -117,3 +117,14 @@
 - ✅ 重构 `src/stepinfer/cache/kv_cache.py`（升级为支持连续批处理的物理插槽隔离槽位式 KV Cache）
 - ✅ 重构并精简调度模块核心抽象
 - ✅ 系统性裁剪与重构测试套件（测试用例总数从 115 个瘦身至 82 个，单测回归更加聚焦、极速且干净）
+
+### Day 15
+
+- ✅ 编写 `tests/test_scheduler.py`（设计 7 大递进场景的 TDD 规格说明书，覆盖空闲槽位池契约、单请求生命周期、满载排队、插槽复用与主动 Abort 零泄漏回收）
+- ✅ 重构 `src/stepinfer/scheduler/scheduler.py`（引入 `free_slots` 物理槽位池，实现入场分配 `slot_id` 与退场即刻回收解绑，重构“有空槽积极 Prefill、无空槽稳步 Decode”的连续批调度策略）
+
+### Day 16
+
+- ✅ 改造 `src/stepinfer/models/qwen3.py`（全链路贯通穿透 `slot_ids` 参数，底层 Attention 支持自然回退，实现模型前向与物理插槽切片写入严密接轨）
+- ✅ 重构 `src/stepinfer/inference/inference_engine.py`（内嵌调度中枢与预分配槽位 KV Cache，实现流水线级别的 `add_request` 与 `step` 迭代主循环，统一由连续批调度接管 `generate` 接口并彻底废除静态左填充与 PAD 陪跑）
+- ✅ 全仓库单测回归验证（全库 90 项单元测试 100% 绿灯，端到端执行耗时缩短至 12.69s，连续批处理四层架构圆满收官）

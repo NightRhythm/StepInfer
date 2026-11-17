@@ -95,6 +95,10 @@ class Scheduler:
         # 运行中的请求集合，使用 dict 保证 O(1) 的按 ID 查找、更新与剔除
         self.running_requests: dict[str, Request] = {}
 
+        # 维护一个空闲槽位池
+        self.free_slots: set[int] = set(range(max_batch_size))
+
+
     def add_request(self, request: Request) -> None:
         """向调度器提交新请求。
 
@@ -128,20 +132,19 @@ class Scheduler:
         for req_id in finished_ids:
             del self.running_requests[req_id]
 
-        # 策略 1: 优先调度 Decode 批次 (全员单步前进)
-        if len(self.running_requests) > 0:
-            active_requests = list(self.running_requests.values())
+        # 调度策略 (连续批处理核心):
+        # 1. 只要有空闲物理槽位且等待队列非空，优先拉取新请求进行 Prefill，快速充实计算批次；
+        # 2. 槽位已满或无新请求时，组织当前所有 RUNNING 请求进行单步自回归 Decode。
+        if not self.free_slots or self.request_queue.is_empty():
+            active_requests = list(self.running_requests.values()) if self.running_requests else []
             return ScheduleResult(
                 requests=active_requests,
                 is_prefill=False,
                 num_tokens=len(active_requests),
             )
 
-        # 策略 2: 运行池空闲，从队列拉取新请求进行 Prefill
-        available_slots = self.max_batch_size - len(self.running_requests)
-        if available_slots <= 0 or self.request_queue.is_empty():
-            return ScheduleResult(requests=[], is_prefill=False, num_tokens=0)
-
+        # 既有空槽位又有等待中的请求，Prefill
+        available_slots = len(self.free_slots)
         new_requests = self.request_queue.get_waiting_requests(max_requests=available_slots)
         valid_requests: list[Request] = []
 
@@ -152,6 +155,7 @@ class Scheduler:
                 continue
 
             req.status = RequestStatus.RUNNING
+            req.slot_id = self.free_slots.pop()
             self.running_requests[req.request_id] = req
             valid_requests.append(req)
 
@@ -208,12 +212,15 @@ class Scheduler:
                     if eos_token_id is not None and int(token) == eos_token_id:
                         req.mark_finished("stop")
 
-        # 2. 检查并弹出已完成的请求，释放槽位
+        # 2. 检查并弹出已完成的请求，释放物理槽位 (零泄漏)
         just_finished: list[Request] = []
         for req in target_requests:
             if req.is_finished:
                 if req.request_id in self.running_requests:
                     del self.running_requests[req.request_id]
+                    if req.slot_id is not None:
+                        self.free_slots.add(req.slot_id)
+                        req.slot_id = None
                 just_finished.append(req)
 
         return just_finished
@@ -231,6 +238,9 @@ class Scheduler:
         if request_id in self.running_requests:
             req = self.running_requests.pop(request_id)
             req.mark_finished("aborted")
+            if req.slot_id is not None:
+                self.free_slots.add(req.slot_id)
+                req.slot_id = None
             return True
 
         # 2. 检查等待队列

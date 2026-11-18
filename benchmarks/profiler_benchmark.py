@@ -66,7 +66,7 @@ def _run_generation(
 
             # 2. Decode 阶段
             for _ in range(max_new_tokens - 1):
-                curr_pos = torch.full((batch_size, 1), kv_cache[0].current_length, device=device)
+                curr_pos = torch.full((batch_size, 1), kv_cache[0].get_seq_len(0), device=device)
                 logits = model(next_token.unsqueeze(-1), positions=curr_pos, kv_cache=kv_cache)
                 next_token = sample_next_token(logits[:, -1, :], method="greedy")
                 input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
@@ -306,14 +306,7 @@ def run_profiler_benchmark(
     md_dir = resolved_raw_dir / "md"
     md_dir.mkdir(parents=True, exist_ok=True)
 
-    if batch_size > 1:
-        md_prefix = "batch"
-    elif use_cache:
-        md_prefix = "kvcache"
-    else:
-        md_prefix = "baseline"
-
-    md_name = f"{md_prefix}_profiler_{model_tag}.md" if not model_tag.startswith(md_prefix) else f"profiler_{model_tag}.md"
+    md_name = f"profiler_{model_tag}.md"
     md_path = md_dir / md_name
 
     trace_path: Path | None = None
@@ -321,7 +314,7 @@ def run_profiler_benchmark(
     if save_trace:
         traces_dir = resolved_raw_dir / "traces"
         traces_dir.mkdir(parents=True, exist_ok=True)
-        trace_name = f"{md_prefix}_trace_{model_tag}_prompt{prompt_length}.json" if not model_tag.startswith(md_prefix) else f"trace_{model_tag}_prompt{prompt_length}.json"
+        trace_name = f"trace_{model_tag}_prompt{prompt_length}.json"
         trace_path = traces_dir / trace_name
         profiler.export_chrome_trace(trace_path)
         logger.info("Exported Chrome trace to %s", trace_path)

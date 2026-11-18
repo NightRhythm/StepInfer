@@ -82,7 +82,7 @@ def _run_generation(
 
             # 2. Decode 阶段
             for _ in range(max_new_tokens - 1):
-                curr_pos = torch.tensor([kv_cache[0].current_length], device=device)
+                curr_pos = torch.tensor([kv_cache[0].get_seq_len(0)], device=device)
                 logits = model(next_token.view(1, 1), positions=curr_pos, kv_cache=kv_cache)
                 next_token = sample_next_token(logits[:, -1, :], method="greedy")
                 input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)
@@ -378,8 +378,7 @@ def run_latency_benchmark(
     md_dir = resolved_raw_dir / "md"
     md_dir.mkdir(parents=True, exist_ok=True)
 
-    md_prefix = "kvcache" if use_cache else "baseline"
-    md_filename = f"{md_prefix}_latency_{model_tag}.md" if not model_tag.startswith(md_prefix) else f"latency_{model_tag}.md"
+    md_filename = f"latency_{model_tag}.md"
     md_path = md_dir / md_filename
     md_path.write_text(report, encoding="utf-8")
     logger.info("Saved raw latency markdown to %s", md_path)
@@ -388,7 +387,7 @@ def run_latency_benchmark(
     if save_json:
         json_dir = resolved_raw_dir / "json"
         json_dir.mkdir(parents=True, exist_ok=True)
-        json_filename = f"{md_prefix}_latency_{model_tag}.json" if not model_tag.startswith(md_prefix) else f"latency_{model_tag}.json"
+        json_filename = f"latency_{model_tag}.json"
         json_path = json_dir / json_filename
         json_payload = {
             "schema_version": 1,

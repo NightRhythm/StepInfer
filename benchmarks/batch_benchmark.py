@@ -84,7 +84,7 @@ def _run_batch_generation(
 
             # 2. Decode 阶段
             for _ in range(max_new_tokens - 1):
-                curr_pos = torch.full((batch_size, 1), kv_cache[0].current_length, device=device)
+                curr_pos = torch.full((batch_size, 1), kv_cache[0].get_seq_len(0), device=device)
                 logits = model(next_token.unsqueeze(-1), positions=curr_pos, kv_cache=kv_cache)
                 next_token = sample_next_token(logits[:, -1, :], method="greedy")
                 input_ids = torch.cat((input_ids, next_token.unsqueeze(-1)), dim=-1)

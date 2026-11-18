@@ -128,3 +128,10 @@
 - ✅ 改造 `src/stepinfer/models/qwen3.py`（全链路贯通穿透 `slot_ids` 参数，底层 Attention 支持自然回退，实现模型前向与物理插槽切片写入严密接轨）
 - ✅ 重构 `src/stepinfer/inference/inference_engine.py`（内嵌调度中枢与预分配槽位 KV Cache，实现流水线级别的 `add_request` 与 `step` 迭代主循环，统一由连续批调度接管 `generate` 接口并彻底废除静态左填充与 PAD 陪跑）
 - ✅ 全仓库单测回归验证（全库 90 项单元测试 100% 绿灯，端到端执行耗时缩短至 12.69s，连续批处理四层架构圆满收官）
+
+### Day 17
+
+- ✅ 实现 `benchmarks/throughput_benchmark.py`（连续批处理吞吐量评测工具，支持非齐次长短请求流生成、静态批处理 vs 连续批处理双基准对照，自动统计服务总耗时 Makespan、有效吞吐率与平均时延加速比）
+- ✅ 重构并解耦既有基准评测工具命名规范（改造 `benchmarks/latency_benchmark.py`、`benchmarks/profiler_benchmark.py` 与 `benchmarks/batch_benchmark.py`，彻底去除硬编码阶段前缀并统一输出通用工件，适配槽位隔离后的 `get_seq_len` 游标接口）
+- ⬜ 待在真实 GPU 上运行连续批处理吞吐量评测并归档测试工件
+

@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "model_name": "Qwen3-0.6B-Base",
+    "num_params": 596049920,
+    "precision": "bf16",
+    "device": "NVIDIA GeForce RTX 5060 Ti",
+    "max_batch_size": 4,
+    "num_requests": 8,
+    "seed": 42
+  },
+  "static": {
+    "mode": "Static Batching",
+    "total_wall_time_sec": 2.197414778987877,
+    "total_prompt_tokens": 80,
+    "total_tokens": 193,
+    "throughput_tok_per_sec": 87.83048236750972,
+    "avg_latency_sec": 1.4913042629486881,
+    "p50_latency_sec": 0.7855115619022399,
+    "p90_latency_sec": 2.1970969639951363,
+    "min_latency_sec": 0.7855115619022399,
+    "max_latency_sec": 2.1970969639951363,
+    "peak_mem_mb": 2273.09912109375,
+    "requests": [
+      {
+        "req_id": 0,
+        "prompt": "What is 15 + 27?",
+        "prompt_len": 10,
+        "target_tokens": 10,
+        "generated_tokens": 10,
+        "latency_sec": 0.7855115619022399
+      },
+      {
+        "req_id": 1,
+        "prompt": "The capital city of France is",
+        "prompt_len": 6,
+        "target_tokens": 8,
+        "generated_tokens": 8,
+        "latency_sec": 0.7855115619022399
+      },
+      {
+        "req_id": 2,
+        "prompt": "Who wrote the play Hamlet?",
+        "prompt_len": 7,
+        "target_tokens": 16,
+        "generated_tokens": 16,
+        "latency_sec": 0.7855115619022399
+      },
+      {
+        "req_id": 3,
+        "prompt": "What is the boiling point of water in Celsius?",
+        "prompt_len": 10,
+        "target_tokens": 15,
+        "generated_tokens": 15,
+        "latency_sec": 0.7855115619022399
+      },
+      {
+        "req_id": 4,
+        "prompt": "Explain the principle of conservation of energy in simple terms:",
+        "prompt_len": 12,
+        "target_tokens": 40,
+        "generated_tokens": 40,
+        "latency_sec": 2.1970969639951363
+      },
+      {
+        "req_id": 5,
+        "prompt": "Write a short three-line poem about the autumn wind and falling leaves:",
+        "prompt_len": 14,
+        "target_tokens": 34,
+        "generated_tokens": 16,
+        "latency_sec": 2.1970969639951363
+      },
+      {
+        "req_id": 6,
+        "prompt": "Summarize why the sky appears blue during the day:",
+        "prompt_len": 12,
+        "target_tokens": 43,
+        "generated_tokens": 43,
+        "latency_sec": 2.1970969639951363
+      },
+      {
+        "req_id": 7,
+        "prompt": "List three major benefits of regular physical exercise:",
+        "prompt_len": 9,
+        "target_tokens": 45,
+        "generated_tokens": 45,
+        "latency_sec": 2.1970969639951363
+      }
+    ]
+  },
+  "continuous": {
+    "mode": "Continuous Batching",
+    "total_wall_time_sec": 1.9207006969954818,
+    "total_prompt_tokens": 80,
+    "total_tokens": 211,
+    "throughput_tok_per_sec": 109.85574188110806,
+    "avg_latency_sec": 1.0814984863245627,
+    "p50_latency_sec": 0.6205388789530843,
+    "p90_latency_sec": 1.9206961969612166,
+    "min_latency_sec": 0.30784072494134307,
+    "max_latency_sec": 1.9206961969612166,
+    "peak_mem_mb": 2271.40625,
+    "requests": [
+      {
+        "req_id": 0,
+        "prompt": "What is 15 + 27?",
+        "prompt_len": 10,
+        "target_tokens": 10,
+        "generated_tokens": 10,
+        "latency_sec": 0.39372607693076134
+      },
+      {
+        "req_id": 1,
+        "prompt": "The capital city of France is",
+        "prompt_len": 6,
+        "target_tokens": 8,
+        "generated_tokens": 8,
+        "latency_sec": 0.30784072494134307
+      },
+      {
+        "req_id": 2,
+        "prompt": "Who wrote the play Hamlet?",
+        "prompt_len": 7,
+        "target_tokens": 16,
+        "generated_tokens": 16,
+        "latency_sec": 0.6205388789530843
+      },
+      {
+        "req_id": 3,
+        "prompt": "What is the boiling point of water in Celsius?",
+        "prompt_len": 10,
+        "target_tokens": 15,
+        "generated_tokens": 15,
+        "latency_sec": 0.560055224923417
+      },
+      {
+        "req_id": 4,
+        "prompt": "Explain the principle of conservation of energy in simple terms:",
+        "prompt_len": 12,
+        "target_tokens": 40,
+        "generated_tokens": 40,
+        "latency_sec": 1.5578282019123435
+      },
+      {
+        "req_id": 5,
+        "prompt": "Write a short three-line poem about the autumn wind and falling leaves:",
+        "prompt_len": 14,
+        "target_tokens": 34,
+        "generated_tokens": 34,
+        "latency_sec": 1.4431727930204943
+      },
+      {
+        "req_id": 6,
+        "prompt": "Summarize why the sky appears blue during the day:",
+        "prompt_len": 12,
+        "target_tokens": 43,
+        "generated_tokens": 43,
+        "latency_sec": 1.8481297929538414
+      },
+      {
+        "req_id": 7,
+        "prompt": "List three major benefits of regular physical exercise:",
+        "prompt_len": 9,
+        "target_tokens": 45,
+        "generated_tokens": 45,
+        "latency_sec": 1.9206961969612166
+      }
+    ]
+  }
+}

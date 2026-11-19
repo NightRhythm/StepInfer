@@ -135,3 +135,9 @@
 - ✅ 重构并解耦既有基准评测工具命名规范（改造 `benchmarks/latency_benchmark.py`、`benchmarks/profiler_benchmark.py` 与 `benchmarks/batch_benchmark.py`，彻底去除硬编码阶段前缀并统一输出通用工件，适配槽位隔离后的 `get_seq_len` 游标接口）
 - ⬜ 待在真实 GPU 上运行连续批处理吞吐量评测并归档测试工件
 
+### Day 18
+
+- ✅ 完善基准数据采集并完成真实 GPU (RTX 5060 Ti) 连续批处理吞吐量评测（升级 `benchmarks/throughput_benchmark.py`，完整记录汇总分位数与逐请求时延明细，产出纯净原始数据工件 `docs/benchmarks/raw/md/continuous_batch_throughput_0.6b.md` 与对应 JSON）
+- ✅ 编写连续批处理深度评测分析报告 `docs/benchmarks/continuous_batch_benchmark.md`（深入剖析迭代级动态调度、消灭木桶陪跑气泡、物理插槽即刻复用机制，实测验证有效吞吐率跃升 25.1%、极短请求时延暴降 60.8%）
+
+
